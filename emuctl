@@ -90,6 +90,10 @@ cmd_list() {
   local first=true
   while IFS= read -r line; do
     [ -z "$line" ] && continue
+    # `--long`'s first line is a "AVD ID   AVD Name   API Level   Status
+    # Serial" header, not a device -- without skipping it, an empty AVD list
+    # would otherwise render as one fake entry literally named "AVD".
+    case "$line" in "AVD ID"*) continue ;; esac
     local name
     name="$(awk '{print $1}' <<< "$line")"
     [ -z "$name" ] && continue
@@ -196,6 +200,17 @@ cmd_stop() {
   "$ANDROID_BIN" emulator stop "$@"
 }
 
+# Runs in the foreground (no nohup/background) and prints one progress line
+# per phase, ending with the bare AVD name as the last line on success --
+# that's deliberate: the widget streams this command's stdout live to show
+# progress, and reads the final line to know what to auto-start once create
+# exits. A system image is a multi-hundred-MB download, so without this a
+# caller (human or widget) would stare at a silent terminal for minutes with
+# no sign anything is happening.
+#
+# License prompts are answered with `yes` rather than left to the terminal:
+# a backgrounded/non-interactive caller has no stdin to answer them with, and
+# the install would otherwise hang or silently decline.
 cmd_create() {
   local profile="${1:?usage: emuctl create <device-id-or-profile> [api-level]}"
   local api="${2:-34}"
@@ -203,10 +218,9 @@ cmd_create() {
   if [ -z "$AVDMANAGER_BIN" ]; then
     # No avdmanager: fall back to the `android` CLI's own generic profile
     # (small_phone, medium_phone, ...), which auto-picks everything itself.
-    nohup "$ANDROID_BIN" emulator create "$profile" \
-      >/tmp/emuctl-create-"$profile".log 2>&1 &
-    disown
-    printf 'creating %s (pid %s)\n' "$profile" "$!"
+    printf 'Creating %s (downloads as needed)...\n' "$profile"
+    yes | "$ANDROID_BIN" emulator create "$profile"
+    printf '%s\n' "$profile"
     return 0
   fi
 
@@ -222,14 +236,11 @@ cmd_create() {
   name="$(printf '%s' "$profile" | tr -cs 'A-Za-z0-9._-' '_')"
   local image_slash="system-images/android-$api/google_apis/x86_64"
   local image_semi="system-images;android-$api;google_apis;x86_64"
-  nohup sh -c '
-    set -e
-    "$1" sdk install "$2"
-    echo no | "$3" create avd -n "$4" -k "$5" -d "$6" --force
-  ' sh "$ANDROID_BIN" "$image_slash" "$AVDMANAGER_BIN" "$name" "$image_semi" "$profile" \
-    >/tmp/emuctl-create-"$name".log 2>&1 &
-  disown
-  printf 'creating %s (api %s, pid %s)\n' "$name" "$api" "$!"
+  printf 'Downloading system image android-%s google_apis x86_64 (this can take a few minutes)...\n' "$api"
+  yes | "$ANDROID_BIN" sdk install "$image_slash"
+  printf 'Creating AVD %s (%s)...\n' "$name" "$profile"
+  echo no | "$AVDMANAGER_BIN" create avd -n "$name" -k "$image_semi" -d "$profile" --force
+  printf '%s\n' "$name"
 }
 
 cmd_remove() {

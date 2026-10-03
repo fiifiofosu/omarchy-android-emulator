@@ -17,8 +17,11 @@ protocol (`adb`), so `emuctl` just shells out to Google's
 - "New virtual device" expands into a row of cards — **Pixel / Tablet /
   Legacy** — with avdmanager installed (see below); pick a card, then pick a
   device from the list under it (Pixel 6, Pixel 7 Pro, Nexus 5, ...) to create
-  an AVD, downloading whatever system image it needs. There's no Samsung/OEM/
-  iPhone card: Google's SDK only ships its own reference hardware (current
+  an AVD, downloading whatever system image it needs (a few hundred MB to a
+  few GB the first time for a given API level — the panel shows live progress
+  and an elapsed-time counter while that happens, not just a static "Creating…").
+  Once it's created, the widget automatically starts it. There's no Samsung/
+  OEM/iPhone card: Google's SDK only ships its own reference hardware (current
   Pixels + a few old Nexus phones), so "Legacy" is that leftover bucket, not a
   brand. Without avdmanager, this falls back to a flat list of the `android`
   CLI's own generic sizes (`small_phone`, `medium_phone`, ...).

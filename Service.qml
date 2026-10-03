@@ -33,8 +33,12 @@ Item {
 
   readonly property string emuctlPath: _emuctl
   readonly property bool ready: _emuctl !== ""
-  readonly property bool busy: actionProcess.running
+  readonly property bool busy: actionProcess.running || createProcess.running
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 8, 2, 3600)
+
+  property bool creating: false
+  property int creatingElapsedSec: 0
+  property string _createLastLine: ""
 
   property string _emuctl: ""
   property bool _resolved: false
@@ -98,9 +102,23 @@ Item {
     else start(avd.id)
   }
 
+  // Creating an AVD can mean downloading a multi-hundred-MB system image, so
+  // unlike start/stop this doesn't go through the quick runAction() path: it
+  // gets its own long-lived process whose stdout is streamed live into
+  // actionStatus (see createProcess below) instead of being collected only
+  // at exit, plus an elapsed-time counter, so the panel always shows that
+  // something is actually happening rather than going quiet for minutes.
   function createFromProfile(profile) {
+    if (!ready || createProcess.running) return
     profilesOpen = false
-    runAction([_emuctl, "create", profile], "Creating " + profile + "… (this can download several hundred MB)")
+    creating = true
+    creatingElapsedSec = 0
+    _createLastLine = ""
+    actionStatus = "Creating " + profile + "…"
+    lastError = ""
+    createProcess.command = [_emuctl, "create", profile]
+    createProcess.running = true
+    createElapsedTimer.restart()
   }
 
   function runAction(command, message) {
@@ -170,7 +188,9 @@ Item {
     onTriggered: {
       ticks += 1
       root.refresh()
-      if (ticks >= 10) { ticks = 0; running = false; root.actionStatus = "" }
+      // 60s: a cold emulator boot (common right after `create`) can take well
+      // past DBForge's container-sized settle window.
+      if (ticks >= 30) { ticks = 0; running = false; root.actionStatus = "" }
     }
   }
 
@@ -218,6 +238,51 @@ Item {
       }
       settleTimer.ticks = 0
       settleTimer.restart()
+      root.refresh()
+    }
+  }
+
+  Timer {
+    id: createElapsedTimer
+    interval: 1000
+    repeat: true
+    running: false
+    onTriggered: {
+      root.creatingElapsedSec += 1
+      if (root._createLastLine !== "") {
+        root.actionStatus = root._createLastLine + " (" + root.creatingElapsedSec + "s)"
+      }
+    }
+  }
+
+  Process {
+    id: createProcess
+    running: false
+    command: []
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) {
+        var t = String(line || "").trim()
+        if (t !== "") root._createLastLine = t
+      }
+    }
+    stderr: StdioCollector { id: createErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      createElapsedTimer.stop()
+      root.creating = false
+      if (exitCode === 0) {
+        // cmd_create's contract is to print the actual AVD name as its last
+        // line, which can differ from the device id it was asked for (ids
+        // with spaces, like "Nexus 7 2013", get sanitized into the name) --
+        // so this is what's actually passed to `start`, not the id the
+        // panel originally clicked.
+        var createdName = root._createLastLine
+        root.actionStatus = createdName !== "" ? "Created " + createdName + ", starting…" : "Created, starting…"
+        if (createdName !== "") root.start(createdName)
+      } else {
+        root.lastError = Model.elide(String(createErr.text || "") || root._createLastLine || "emuctl create failed")
+        root.actionStatus = ""
+      }
       root.refresh()
     }
   }
