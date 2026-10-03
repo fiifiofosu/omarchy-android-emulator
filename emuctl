@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# emuctl - thin CLI around Google's Android CLI (the `android` binary:
+# https://developer.android.com/tools/agents/android-cli) for the Omarchy bar
+# widget. There is no daemon here: `android emulator` and `adb` already do the
+# real work, so emuctl just resolves the binaries, shells out, and reshapes
+# output into JSON the widget can render.
+set -euo pipefail
+
+find_android_bin() {
+  if [ -n "${EMUCTL_ANDROID:-}" ] && [ -x "${EMUCTL_ANDROID:-}" ]; then
+    printf '%s\n' "$EMUCTL_ANDROID"; return 0
+  fi
+  for p in "$HOME/.local/bin/android" "$HOME/.android/bin/android-cli"; do
+    [ -x "$p" ] && { printf '%s\n' "$p"; return 0; }
+  done
+  command -v android 2>/dev/null || true
+}
+
+ANDROID_BIN="$(find_android_bin)"
+die() { printf 'emuctl: %s\n' "$*" >&2; exit 1; }
+[ -n "$ANDROID_BIN" ] || die "the 'android' CLI is not installed (see https://developer.android.com/tools/agents/android-cli/download)"
+
+sdk_root() { "$ANDROID_BIN" info sdk 2>/dev/null || true; }
+
+find_adb() {
+  local root
+  root="$(sdk_root)"
+  if [ -n "$root" ] && [ -x "$root/platform-tools/adb" ]; then
+    printf '%s\n' "$root/platform-tools/adb"; return 0
+  fi
+  command -v adb 2>/dev/null || true
+}
+
+ADB_BIN="$(find_adb)"
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+# Prints "serial<TAB>avdname" for every running emulator, one per line.
+running_map() {
+  [ -n "$ADB_BIN" ] || return 0
+  "$ADB_BIN" devices 2>/dev/null | awk '/^emulator-/ {print $1}' | while read -r serial; do
+    name=$("$ADB_BIN" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r')
+    [ -n "$name" ] && printf '%s\t%s\n' "$serial" "$name"
+  done
+}
+
+# ---- commands -----------------------------------------------------------
+
+cmd_doctor() {
+  local ok=true
+  printf 'android CLI: %s\n' "$ANDROID_BIN"
+  "$ANDROID_BIN" info 2>&1 | sed 's/^/  /' || ok=false
+  if [ -n "$ADB_BIN" ]; then printf '  [ok] adb          %s\n' "$ADB_BIN"; else printf '  [missing] adb\n'; fi
+  if [ -e /dev/kvm ]; then printf '  [ok] /dev/kvm present\n'; else printf '  [missing] /dev/kvm (emulator will run unaccelerated)\n'; fi
+  $ok || exit 1
+}
+
+# `android emulator list --long` is the only source of truth for which AVDs
+# exist; its exact column layout isn't a stable contract, so each line is
+# parsed defensively (first whitespace-delimited token is the name) rather
+# than assuming fixed columns.
+cmd_list() {
+  local json=false
+  [ "${1:-}" = "--json" ] && json=true
+
+  local raw
+  raw="$("$ANDROID_BIN" emulator list --long 2>/dev/null || true)"
+  local running
+  running="$(running_map)"
+
+  if ! $json; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+
+  printf '['
+  local first=true
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local name
+    name="$(awk '{print $1}' <<< "$line")"
+    [ -z "$name" ] && continue
+    local status="stopped" port=0
+    while IFS=$'\t' read -r s n; do
+      if [ "$n" = "$name" ]; then
+        status="running"
+        port="${s#emulator-}"
+        break
+      fi
+    done <<< "$running"
+    $first || printf ','
+    first=false
+    printf '{"id":"%s","detail":"%s","status":"%s","port":%s}' \
+      "$(json_escape "$name")" "$(json_escape "$line")" "$status" "${port:-0}"
+  done <<< "$raw"
+  printf ']\n'
+}
+
+cmd_profiles() {
+  "$ANDROID_BIN" emulator create --list-profiles
+}
+
+cmd_start() {
+  local name="" cold=false headless=false
+  for a in "$@"; do
+    case "$a" in
+      --cold) cold=true ;;
+      --headless) headless=true ;;
+      *) name="$a" ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: emuctl start <avd> [--cold] [--headless]"
+  local -a flags=()
+  $cold && flags+=(--cold)
+  $headless && flags+=(--headless)
+  # `android emulator start` blocks until the AVD is fully booted, which is
+  # too long to hold the widget's action process open, so it's launched
+  # detached and the widget finds out it's up via the next `list` poll.
+  nohup "$ANDROID_BIN" emulator start "${flags[@]}" "$name" \
+    >/tmp/emuctl-start-"$name".log 2>&1 &
+  disown
+  printf 'starting %s (pid %s)\n' "$name" "$!"
+}
+
+cmd_stop() {
+  "$ANDROID_BIN" emulator stop "$@"
+}
+
+cmd_create() {
+  local profile="${1:?usage: emuctl create <profile> (see: emuctl profiles)}"
+  # Downloads whatever system image/emulator build the profile needs, which
+  # can take minutes on a first run, so this also runs detached; `emuctl list`
+  # is how the widget learns the AVD showed up.
+  nohup "$ANDROID_BIN" emulator create "$profile" \
+    >/tmp/emuctl-create-"$profile".log 2>&1 &
+  disown
+  printf 'creating %s (pid %s)\n' "$profile" "$!"
+}
+
+cmd_remove() {
+  "$ANDROID_BIN" emulator remove "$@"
+}
+
+# ---- SDK / system-image packages ----------------------------------------
+
+cmd_images() {
+  local json=false
+  [ "${1:-}" = "--json" ] && json=true
+
+  local raw
+  raw="$("$ANDROID_BIN" sdk list --all 2>/dev/null || true)"
+  local installed_raw
+  installed_raw="$("$ANDROID_BIN" sdk list 2>/dev/null || true)"
+
+  local available installed
+  available="$(grep -oE 'system-images/[^ ]+' <<< "$raw" | sort -u || true)"
+  installed="$(grep -oE 'system-images/[^ ]+' <<< "$installed_raw" | sort -u || true)"
+
+  if ! $json; then
+    printf '%s\n' "$available"
+    return 0
+  fi
+
+  printf '['
+  local first=true
+  while IFS= read -r pkg; do
+    [ -z "$pkg" ] && continue
+    local inst=false
+    if grep -qxF "$pkg" <<< "$installed"; then inst=true; fi
+    $first || printf ','
+    first=false
+    printf '{"package":"%s","installed":%s}' "$(json_escape "$pkg")" "$inst"
+  done <<< "$available"
+  printf ']\n'
+}
+
+cmd_install() {
+  local package="${1:?usage: emuctl install <package>}"
+  nohup "$ANDROID_BIN" sdk install "$package" \
+    >/tmp/emuctl-install-"$(basename "$package")".log 2>&1 &
+  disown
+  printf 'installing %s (pid %s)\n' "$package" "$!"
+}
+
+usage() {
+  cat <<'EOF'
+emuctl - manage Android Virtual Devices via the `android` CLI
+
+Usage:
+  emuctl doctor                Check that the android CLI / adb / KVM are reachable
+  emuctl list [--json]         List AVDs and whether each is running
+  emuctl profiles              List device profiles usable with `create`
+  emuctl start <avd> [--cold] [--headless]
+  emuctl stop [<avd>]          Stop a running AVD (omit name if only one is running)
+  emuctl create <profile>      Create an AVD from a device profile (downloads as needed)
+  emuctl remove <avd> [--force]
+  emuctl images [--json]       List system-image packages (installed + available)
+  emuctl install <package>     android sdk install <package>
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    doctor) cmd_doctor "$@" ;;
+    list) cmd_list "$@" ;;
+    profiles) cmd_profiles "$@" ;;
+    start) cmd_start "$@" ;;
+    stop) cmd_stop "$@" ;;
+    create) cmd_create "$@" ;;
+    remove) cmd_remove "$@" ;;
+    images) cmd_images "$@" ;;
+    install) cmd_install "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) die "unknown command: $cmd (see --help)" ;;
+  esac
+}
+
+main "$@"
