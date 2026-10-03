@@ -509,6 +509,15 @@ Panel {
         }
       }
 
+      PanelActionButton {
+        iconText: "✕"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        tooltipText: "Delete " + (avdRow.avd ? avdRow.avd.id : "")
+        Layout.alignment: Qt.AlignVCenter
+        onClicked: emu.removeAvd(avdRow.avd)
+      }
+
       ToggleSwitch {
         checked: Model.isRunning(avdRow.avd)
         busy: emu.busy

@@ -102,6 +102,21 @@ Item {
     else start(avd.id)
   }
 
+  // Deleting a running AVD out from under the emulator process is asking for
+  // trouble, so it's stopped first and removed once that settles rather than
+  // racing the two.
+  function removeAvd(avd) {
+    if (!avd || busy) return
+    if (Model.isRunning(avd)) {
+      runAction([_emuctl, "stop", avd.id], "Stopping " + avd.id + " before delete…")
+      _pendingRemoval = avd.id
+      return
+    }
+    runAction([_emuctl, "remove", avd.id, "--force"], "Deleting " + avd.id + "…")
+  }
+
+  property string _pendingRemoval: ""
+
   // Creating an AVD can mean downloading a multi-hundred-MB system image, so
   // unlike start/stop this doesn't go through the quick runAction() path: it
   // gets its own long-lived process whose stdout is streamed live into
@@ -146,13 +161,20 @@ Item {
 
   // Doctor output and the full SDK package list are read-only and can be
   // long, so they are opened in a terminal rather than crammed into the
-  // panel.
+  // panel. `-e` terminals close the instant the command exits, and
+  // `emuctl doctor`/`images` typically finish in a few seconds -- without a
+  // pause the window opens and closes too fast to read anything, success or
+  // failure alike. So the actual `-e` target is a small wrapper that runs
+  // emuctl and then waits for a keypress before letting the terminal close.
   function openInTerminal(args) {
     Quickshell.execDetached([
       "sh", "-c",
-      'cmd="$1"; shift\n' +
-      'if command -v omarchy-launch-tui >/dev/null 2>&1; then exec omarchy-launch-tui "$cmd" "$@"; fi\n' +
-      'exec uwsm-app -- xdg-terminal-exec -e "$cmd" "$@"\n',
+      'emuctl="$1"; shift\n' +
+      // No leading "exec": that would replace this process with emuctl's, so
+      // the pause after it would never run -- it has to be a plain call.
+      'inner=\'"$0" "$@" 2>&1; echo; printf "(press Enter to close)"; read -r _\'\n' +
+      'if command -v omarchy-launch-tui >/dev/null 2>&1; then exec omarchy-launch-tui sh -c "$inner" "$emuctl" "$@"; fi\n' +
+      'exec uwsm-app -- xdg-terminal-exec -e sh -c "$inner" "$emuctl" "$@"\n',
       "sh", _emuctl
     ].concat(args))
   }
@@ -235,6 +257,14 @@ Item {
       if (exitCode !== 0) {
         root.lastError = Model.elide(String(actionErr.text || actionOut.text || "") || "Command failed")
         root.actionStatus = ""
+        root._pendingRemoval = ""
+      } else if (root._pendingRemoval !== "") {
+        var id = root._pendingRemoval
+        root._pendingRemoval = ""
+        root.actionStatus = "Deleting " + id + "…"
+        actionProcess.command = [root._emuctl, "remove", id, "--force"]
+        actionProcess.running = true
+        return
       }
       settleTimer.ticks = 0
       settleTimer.restart()
