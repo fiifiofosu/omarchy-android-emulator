@@ -90,6 +90,21 @@ emuctl images [--json]        List system-image packages (installed + available)
 emuctl install <package>      android sdk install <package>
 ```
 
+## Known issues
+
+- **Foldable devices (Pixel Fold, Pixel \*\_Pro\_Fold) can render with visible
+  tearing/ghosting**, especially on Linux with host GPU acceleration. Their
+  AVDs configure a *second* virtual display for the unfolded state
+  (`Configuring second built-in display...` in the emulator's own log at
+  `~/.android/<avd>/emulator.log`), and that second GL context occasionally
+  gets preempted mid-render (`DisplaySurfaceGlContextHelper context was
+  preempted by others` / `error null ctx` in the log) — this is an
+  upstream gfxstream/emulator bug with dual-display rendering, not something
+  `emuctl` or this widget controls. Regular (non-fold) Pixel phones don't hit
+  this. If you need to test a foldable, forcing software rendering
+  (`emulator -avd <name> -gpu swiftshader_indirect`, run directly rather than
+  through `emuctl`) avoids the GPU context conflict at the cost of speed.
+
 ## Uninstall
 
 ```sh
