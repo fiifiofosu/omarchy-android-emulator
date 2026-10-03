@@ -10,19 +10,27 @@ PLUGIN_ID="io.github.fiifiofosu.android-emulator"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="${OMARCHY_PLUGIN_DIR:-$HOME/.config/omarchy/plugins}/$PLUGIN_ID"
 BIN_DEST="${HOME}/.local/bin"
+HYPR_FILE="$HOME/.config/hypr/hyprland.lua"
+HYPR_RULE_SENTINEL='o.window({ class = "^Emulator$" }, { float = true })'
+HYPR_RULE_BEGIN='-- >>> omarchy-android-emulator: float the emulator window >>>'
+HYPR_RULE_END='-- <<< omarchy-android-emulator: float the emulator window <<<'
 
-# Enabling edits ~/.config/omarchy/shell.json and puts the widget on the bar,
-# which is the user's configuration, not ours. Copying the plugin in is not
-# the same decision as turning it on, so the two are asked separately.
-# --enable/--no-enable answer ahead of time, for scripts and for a
-# non-interactive shell, where the default is to install without enabling.
+# Enabling edits ~/.config/omarchy/shell.json and puts the widget on the bar;
+# the Hyprland rule edits hyprland.lua so the emulator floats instead of
+# tiling full-screen. Both are the user's configuration, not ours, so both
+# are asked about rather than applied silently -- --enable/--no-enable and
+# --hypr-rule/--no-hypr-rule answer ahead of time, for scripts and for a
+# non-interactive shell, where the default for both is "don't touch it".
 ENABLE=""
+HYPR_RULE=""
 for arg in "$@"; do
   case "$arg" in
     --enable) ENABLE=yes ;;
     --no-enable) ENABLE=no ;;
+    --hypr-rule) HYPR_RULE=yes ;;
+    --no-hypr-rule) HYPR_RULE=no ;;
     -h|--help)
-      echo "Usage: install.sh [--enable | --no-enable]"
+      echo "Usage: install.sh [--enable | --no-enable] [--hypr-rule | --no-hypr-rule]"
       exit 0
       ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -32,6 +40,57 @@ done
 say()  { printf '\033[32m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+
+# Without this, Hyprland tiles the emulator like any other window -- as the
+# sole/largest tile it fills most of the screen, phone content letterboxed in
+# black. Idempotent via a sentinel grep (matches whether the line got there
+# through this function or was added by hand before this existed), backs up
+# hyprland.lua before writing, and checks `hyprctl configerrors` after
+# reloading so a malformed edit doesn't silently leave Hyprland broken.
+add_hypr_rule() {
+  if [ ! -f "$HYPR_FILE" ]; then
+    warn "$HYPR_FILE not found; skipping the Hyprland float rule"
+    return 0
+  fi
+  if grep -qF "$HYPR_RULE_SENTINEL" "$HYPR_FILE"; then
+    say "Hyprland float rule already present in hyprland.lua"
+    return 0
+  fi
+
+  local backup="$HYPR_FILE.bak.$(date +%s)"
+  cp "$HYPR_FILE" "$backup"
+
+  {
+    echo ""
+    echo "$HYPR_RULE_BEGIN"
+    echo '-- Android Emulator: float it with a phone-shaped size instead of tiling.'
+    echo '-- Floating is matched on class alone (not the full title) because the'
+    echo '-- window is created titled just "Emulator" and only renames itself to'
+    echo '-- "Android Emulator - <avd>:<port>" after the guest boots -- a'
+    echo '-- title-only match would race that rename and intermittently miss the'
+    echo '-- window.'
+    echo "$HYPR_RULE_SENTINEL"
+    echo 'o.window({ class = "^Emulator$", title = "^Android Emulator - .*$" }, {'
+    echo '  center = true,'
+    echo '  size = { 420, 900 },'
+    echo '})'
+    echo "$HYPR_RULE_END"
+  } >> "$HYPR_FILE"
+  say "Added the Hyprland float rule to hyprland.lua (backup: $(basename "$backup"))"
+
+  if command -v hyprctl >/dev/null 2>&1 && hyprctl reload >/dev/null 2>&1; then
+    local errs
+    errs="$(hyprctl configerrors 2>/dev/null || true)"
+    if [ -n "$errs" ]; then
+      warn "hyprctl reported config errors after adding the rule -- restoring the backup:"
+      warn "$errs"
+      cp "$backup" "$HYPR_FILE"
+      hyprctl reload >/dev/null 2>&1 || true
+    else
+      say "Reloaded Hyprland"
+    fi
+  fi
+}
 
 command -v omarchy >/dev/null 2>&1 ||
   die "omarchy is not on PATH; this widget needs Omarchy 4.0 or newer"
@@ -69,6 +128,23 @@ if command -v omarchy >/dev/null 2>&1 && pgrep -x quickshell >/dev/null 2>&1; th
   say "Restarted the Omarchy shell to pick up the latest widget code"
 else
   warn "omarchy-shell is not running; the widget appears on next login"
+fi
+
+if [ -z "$HYPR_RULE" ]; then
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf 'Add the recommended Hyprland rule so the emulator floats instead of tiling full-screen? [Y/n] '
+    read -r reply
+    case "$reply" in [Nn]*) HYPR_RULE=no ;; *) HYPR_RULE=yes ;; esac
+  else
+    HYPR_RULE=no
+  fi
+fi
+
+if [ "$HYPR_RULE" = yes ]; then
+  add_hypr_rule
+else
+  say "Skipped the Hyprland float rule. Add it later -- see the README's"
+  say "'Hyprland: float the emulator window' section, or re-run with --hypr-rule."
 fi
 
 if [ -z "$ENABLE" ]; then

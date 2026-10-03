@@ -8,6 +8,9 @@ set -euo pipefail
 PLUGIN_ID="io.github.fiifiofosu.android-emulator"
 DEST="${OMARCHY_PLUGIN_DIR:-$HOME/.config/omarchy/plugins}/$PLUGIN_ID"
 BIN="$HOME/.local/bin/emuctl"
+HYPR_FILE="$HOME/.config/hypr/hyprland.lua"
+HYPR_RULE_BEGIN='-- >>> omarchy-android-emulator: float the emulator window >>>'
+HYPR_RULE_END='-- <<< omarchy-android-emulator: float the emulator window <<<'
 
 say()  { printf '\033[32m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
@@ -27,6 +30,27 @@ fi
 if [ -f "$BIN" ]; then
   rm -f "$BIN"
   say "Removed $BIN"
+fi
+
+# Only strips the block install.sh's own marker comments bound -- a rule
+# added by hand (without the markers) is left alone, same as how install.sh
+# would have treated it as "already present" rather than its own to manage.
+if [ -f "$HYPR_FILE" ] && grep -qF "$HYPR_RULE_BEGIN" "$HYPR_FILE"; then
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf 'Remove the Hyprland float rule this plugin added to hyprland.lua? [y/N] '
+    read -r reply
+  else
+    reply=n
+  fi
+  case "$reply" in
+    [Yy]*)
+      cp "$HYPR_FILE" "$HYPR_FILE.bak.$(date +%s)"
+      sed -i "/^$(printf '%s' "$HYPR_RULE_BEGIN" | sed 's/[.[\*^$/]/\\&/g')\$/,/^$(printf '%s' "$HYPR_RULE_END" | sed 's/[.[\*^$/]/\\&/g')\$/d" "$HYPR_FILE"
+      say "Removed the Hyprland float rule from hyprland.lua"
+      command -v hyprctl >/dev/null 2>&1 && hyprctl reload >/dev/null 2>&1 || true
+      ;;
+    *) say "Left the Hyprland float rule in hyprland.lua" ;;
+  esac
 fi
 
 omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true

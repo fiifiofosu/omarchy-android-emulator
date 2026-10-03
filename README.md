@@ -50,8 +50,12 @@ protocol (`adb`), so `emuctl` just shells out to Google's
 ## Install
 
 ```sh
-./install.sh --enable
+./install.sh --enable --hypr-rule
 ```
+
+(Omit `--hypr-rule` — or pass `--no-hypr-rule` for a non-interactive run — to
+skip the Hyprland window rule described below; without either flag the
+installer asks.)
 
 This installs `emuctl` to `~/.local/bin` and copies the widget into
 `~/.config/omarchy/plugins/io.github.fiifiofosu.android-emulator/`. Re-run it
@@ -71,13 +75,21 @@ omarchy plugin enable io.github.fiifiofosu.android-emulator
 omarchy bar move io.github.fiifiofosu.android-emulator
 ```
 
-## Hyprland: float the emulator window (recommended)
+## Hyprland: float the emulator window
 
 Without a window rule, Hyprland tiles the emulator like any other window --
 as the sole/largest tile it ends up filling most of the screen, with the
-actual phone content letterboxed in black. This installer deliberately does
-not edit your Hyprland config for you (that's config Omarchy leaves to you
-to opt into), so add this yourself to `~/.config/hypr/hyprland.lua`:
+actual phone content letterboxed in black.
+
+`install.sh` asks whether to add a window rule that fixes this (answer ahead
+of time with `--hypr-rule` / `--no-hypr-rule`). It's appended to
+`~/.config/hypr/hyprland.lua` between marker comments, backed up first, and
+rolled back automatically if `hyprctl configerrors` reports a problem after
+reloading. `uninstall.sh` offers to remove exactly that marked block — a
+rule you added by hand (without the markers) before this existed is left
+alone either way, never touched by either script.
+
+The rule itself, if you'd rather add or inspect it manually:
 
 ```lua
 -- Android Emulator: float it with a phone-shaped size instead of tiling.
