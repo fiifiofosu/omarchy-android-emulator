@@ -149,23 +149,18 @@ Panel {
         else if (key === "s") emu.openSdkManager()
       }
 
-      Flickable {
-        id: panelFlick
-        anchors.fill: parent
-        contentWidth: width
-        contentHeight: column.implicitHeight
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        flickableDirection: Flickable.VerticalFlick
-        interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+      // No single Flickable around everything: the header (hero, status
+      // text, "new device" row, category cards) stays put, and only the two
+      // lists that can actually grow long -- the device-profile list under a
+      // selected category, and the AVD list -- scroll within their own
+      // small bounded viewport. Otherwise picking Pixel (30+ devices) would
+      // drag the whole panel, header included, into scroll mode.
+      Column {
+        id: column
+        width: keyCatcher.width
+        spacing: Style.space(12)
 
-        Column {
-          id: column
-          width: panelFlick.width
-          spacing: Style.space(12)
-
-          PanelHero {
+        PanelHero {
             id: hero
             width: parent.width
             title: "Android Emulator"
@@ -257,20 +252,34 @@ Panel {
               }
             }
 
-            Column {
+            Flickable {
+              id: profileListFlick
               width: parent.width
-              spacing: Style.space(6)
+              height: Math.min(profileListColumn.implicitHeight, Style.space(180))
+              contentWidth: width
+              contentHeight: profileListColumn.implicitHeight
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              flickableDirection: Flickable.VerticalFlick
+              interactive: contentHeight > height
+              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-              Repeater {
-                model: emu.visibleProfiles
+              Column {
+                id: profileListColumn
+                width: profileListFlick.width
+                spacing: Style.space(6)
 
-                ProfileRow {
-                  required property var modelData
-                  required property int index
-                  width: parent.width
-                  profileId: modelData.id
-                  profileLabel: modelData.label
-                  rowIndex: index
+                Repeater {
+                  model: emu.visibleProfiles
+
+                  ProfileRow {
+                    required property var modelData
+                    required property int index
+                    width: parent.width
+                    profileId: modelData.id
+                    profileLabel: modelData.label
+                    rowIndex: index
+                  }
                 }
               }
             }
@@ -301,19 +310,33 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-            Column {
+            Flickable {
+              id: avdListFlick
               width: parent.width
-              spacing: Style.space(6)
+              height: Math.min(avdListColumn.implicitHeight, Style.space(220))
+              contentWidth: width
+              contentHeight: avdListColumn.implicitHeight
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              flickableDirection: Flickable.VerticalFlick
+              interactive: contentHeight > height
+              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-              Repeater {
-                model: emu.avds
+              Column {
+                id: avdListColumn
+                width: avdListFlick.width
+                spacing: Style.space(6)
 
-                AvdRow {
-                  required property var modelData
-                  required property int index
-                  width: parent.width
-                  avd: modelData
-                  rowIndex: index
+                Repeater {
+                  model: emu.avds
+
+                  AvdRow {
+                    required property var modelData
+                    required property int index
+                    width: parent.width
+                    avd: modelData
+                    rowIndex: index
+                  }
                 }
               }
             }
@@ -321,7 +344,6 @@ Panel {
         }
       }
     }
-  }
 
   component NewAvdRow: CursorSurface {
     id: newAvdRow
