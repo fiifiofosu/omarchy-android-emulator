@@ -58,10 +58,15 @@ for f in manifest.json Panel.qml Service.qml AndroidIcon.qml Model.js README.md 
 done
 say "Installed to $DEST"
 
-# A running shell has already scanned its plugin directory, and it cannot
-# enable a plugin it has not discovered yet. So rescan first, then enable.
-if omarchy-shell shell rescanPlugins >/dev/null 2>&1; then
-  say "Rescanned plugins"
+# rescanPlugins discovers a *new* plugin fine, but on an update it does not
+# make an already-loaded widget re-read its QML from disk -- a bar that was
+# already running the old Panel.qml keeps running it until something forces
+# a reload. Installed-file diffs alone can't tell "first install" from
+# "update to a plugin already enabled", so this always restarts the shell
+# rather than risk silently serving stale QML after every `git pull`.
+if command -v omarchy >/dev/null 2>&1 && pgrep -x quickshell >/dev/null 2>&1; then
+  omarchy restart shell >/dev/null 2>&1
+  say "Restarted the Omarchy shell to pick up the latest widget code"
 else
   warn "omarchy-shell is not running; the widget appears on next login"
 fi

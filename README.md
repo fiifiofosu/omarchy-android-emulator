@@ -56,7 +56,12 @@ protocol (`adb`), so `emuctl` just shells out to Google's
 This installs `emuctl` to `~/.local/bin` and copies the widget into
 `~/.config/omarchy/plugins/io.github.fiifiofosu.android-emulator/`. Re-run it
 after pulling updates — Omarchy plugin folders can't contain symlinks, so the
-installer copies files in rather than linking the repo.
+installer copies files in rather than linking the repo. It also restarts the
+Omarchy shell (`omarchy restart shell`) so an already-running bar actually
+picks up the new code: copying files alone updates what's on disk, but a
+widget that was already loaded keeps running its old QML until something
+forces it to reload, which otherwise looks like the update silently didn't
+take.
 
 Without `--enable`, the widget is installed but not placed on the bar; turn
 it on later with:
