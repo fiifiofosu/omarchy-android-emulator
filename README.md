@@ -14,9 +14,11 @@ protocol (`adb`), so `emuctl` just shells out to Google's
 
 - Click the bar icon to see your AVDs and whether each is running.
 - Toggle a switch to start or stop one.
-- "New virtual device" expands a list of device profiles (phone/tablet/
-  desktop sizes); picking one creates an AVD, downloading whatever system
-  image it needs.
+- "New virtual device" expands a list of device profiles; picking one
+  creates an AVD, downloading whatever system image it needs. With
+  `cmdline-tools` installed (see below), this list is real hardware profiles
+  — Pixel 6, Pixel 7 Pro, Pixel Fold, etc. Without it, the `android` CLI only
+  offers generic sizes (`small_phone`, `medium_phone`, ...).
 - The header's two buttons open a terminal running `emuctl doctor` (checks
   the `android` CLI, `adb`, and `/dev/kvm`) and `emuctl images` (lists
   installed/available system-image packages) — these are read/diagnostic
@@ -31,6 +33,13 @@ protocol (`adb`), so `emuctl` just shells out to Google's
   ```
 - `/dev/kvm` for hardware-accelerated emulation (`emuctl doctor` checks this).
 - Omarchy 4.0+.
+- Optional: real Pixel device profiles (instead of generic sizes) need
+  `avdmanager`, which isn't part of the `android` CLI itself. Install it with:
+  ```sh
+  emuctl enable-devices
+  ```
+  (this is `android sdk install cmdline-tools/latest` under the hood — a
+  one-time, ~50MB download.)
 
 ## Install
 
@@ -56,15 +65,18 @@ omarchy bar move io.github.fiifiofosu.android-emulator
 The widget's backend is a standalone script, usable on its own:
 
 ```
-emuctl doctor                Check that android CLI / adb / KVM are reachable
-emuctl list [--json]         List AVDs and whether each is running
-emuctl profiles              List device profiles usable with `create`
+emuctl doctor                 Check that android CLI / adb / avdmanager / KVM are reachable
+emuctl enable-devices         Install cmdline-tools for real device ids (pixel_6, ...)
+emuctl list [--json]          List AVDs and whether each is running
+emuctl profiles               List device ids/profiles usable with `create`
 emuctl start <avd> [--cold] [--headless]
-emuctl stop [<avd>]          Stop a running AVD (omit name if only one is running)
-emuctl create <profile>      Create an AVD from a device profile (downloads as needed)
+emuctl stop [<avd>]           Stop a running AVD (omit name if only one is running)
+emuctl create <device-id-or-profile> [api-level]
+                               Create an AVD (downloads its system image as needed;
+                               api-level defaults to 34, only used with avdmanager)
 emuctl remove <avd> [--force]
-emuctl images [--json]       List system-image packages (installed + available)
-emuctl install <package>     android sdk install <package>
+emuctl images [--json]        List system-image packages (installed + available)
+emuctl install <package>      android sdk install <package>
 ```
 
 ## Uninstall

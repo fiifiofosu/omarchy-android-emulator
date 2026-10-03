@@ -33,6 +33,23 @@ find_adb() {
 
 ADB_BIN="$(find_adb)"
 
+# avdmanager isn't part of the `android` CLI itself -- it ships in the
+# classic "cmdline-tools" package (`android sdk install cmdline-tools/latest`)
+# -- but it's the only thing that knows about real hardware profiles like
+# "pixel_6". Without it, profiles fall back to the `android` CLI's generic
+# phone/tablet/desktop sizes.
+find_avdmanager() {
+  local root
+  root="$(sdk_root)"
+  [ -n "$root" ] || return 0
+  local p
+  for p in "$root"/cmdline-tools/latest/bin/avdmanager "$root"/cmdline-tools/*/bin/avdmanager; do
+    [ -x "$p" ] && { printf '%s\n' "$p"; return 0; }
+  done
+}
+
+AVDMANAGER_BIN="$(find_avdmanager)"
+
 json_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -50,15 +67,6 @@ running_map() {
 }
 
 # ---- commands -----------------------------------------------------------
-
-cmd_doctor() {
-  local ok=true
-  printf 'android CLI: %s\n' "$ANDROID_BIN"
-  "$ANDROID_BIN" info 2>&1 | sed 's/^/  /' || ok=false
-  if [ -n "$ADB_BIN" ]; then printf '  [ok] adb          %s\n' "$ADB_BIN"; else printf '  [missing] adb\n'; fi
-  if [ -e /dev/kvm ]; then printf '  [ok] /dev/kvm present\n'; else printf '  [missing] /dev/kvm (emulator will run unaccelerated)\n'; fi
-  $ok || exit 1
-}
 
 # `android emulator list --long` is the only source of truth for which AVDs
 # exist; its exact column layout isn't a stable contract, so each line is
@@ -101,8 +109,49 @@ cmd_list() {
   printf ']\n'
 }
 
+cmd_doctor() {
+  local ok=true
+  printf 'android CLI: %s\n' "$ANDROID_BIN"
+  "$ANDROID_BIN" info 2>&1 | sed 's/^/  /' || ok=false
+  if [ -n "$ADB_BIN" ]; then printf '  [ok] adb          %s\n' "$ADB_BIN"; else printf '  [missing] adb\n'; fi
+  if [ -n "$AVDMANAGER_BIN" ]; then
+    printf '  [ok] avdmanager   %s\n' "$AVDMANAGER_BIN"
+  else
+    printf '  [optional] avdmanager not found -- run: emuctl enable-devices\n'
+    printf '             (installs cmdline-tools so `create` can use real\n'
+    printf '             device profiles like pixel_6 instead of medium_phone)\n'
+  fi
+  if [ -e /dev/kvm ]; then printf '  [ok] /dev/kvm present\n'; else printf '  [missing] /dev/kvm (emulator will run unaccelerated)\n'; fi
+  $ok || exit 1
+}
+
+cmd_enable_devices() {
+  [ -z "$AVDMANAGER_BIN" ] || { printf 'avdmanager already installed: %s\n' "$AVDMANAGER_BIN"; return 0; }
+  "$ANDROID_BIN" sdk install cmdline-tools/latest
+}
+
+# Without avdmanager: the `android` CLI's own generic size profiles
+# (small_phone, medium_phone, ...), one per line.
+#
+# With avdmanager: real hardware profiles, "id<TAB>Display Name" per line, so
+# the widget can show "Pixel 6" while passing "pixel_6" to `create`. Only
+# phones/tablets/foldables are listed -- avdmanager also knows about TVs,
+# Android Auto head units and Wear faces, which aren't what this widget is for.
 cmd_profiles() {
-  "$ANDROID_BIN" emulator create --list-profiles
+  if [ -z "$AVDMANAGER_BIN" ]; then
+    "$ANDROID_BIN" emulator create --list-profiles
+    return 0
+  fi
+  "$AVDMANAGER_BIN" list device 2>/dev/null | awk '
+    /^id: / {
+      id = $0
+      sub(/^id: [0-9]+ or "/, "", id)
+      sub(/".*/, "", id)
+      getline name
+      sub(/^ *Name: /, "", name)
+      if (id ~ /^pixel/) print id "\t" name
+    }
+  '
 }
 
 cmd_start() {
@@ -132,14 +181,33 @@ cmd_stop() {
 }
 
 cmd_create() {
-  local profile="${1:?usage: emuctl create <profile> (see: emuctl profiles)}"
-  # Downloads whatever system image/emulator build the profile needs, which
-  # can take minutes on a first run, so this also runs detached; `emuctl list`
-  # is how the widget learns the AVD showed up.
-  nohup "$ANDROID_BIN" emulator create "$profile" \
+  local profile="${1:?usage: emuctl create <device-id-or-profile> [api-level]}"
+  local api="${2:-34}"
+
+  if [ -z "$AVDMANAGER_BIN" ]; then
+    # No avdmanager: fall back to the `android` CLI's own generic profile
+    # (small_phone, medium_phone, ...), which auto-picks everything itself.
+    nohup "$ANDROID_BIN" emulator create "$profile" \
+      >/tmp/emuctl-create-"$profile".log 2>&1 &
+    disown
+    printf 'creating %s (pid %s)\n' "$profile" "$!"
+    return 0
+  fi
+
+  # avdmanager available: create a real device (e.g. "pixel_6") instead of a
+  # generic size bucket. The AVD is named after the device id so repeat
+  # clicks in the widget are idempotent rather than piling up "pixel_6",
+  # "pixel_6_2", ... -- --force lets a second create just recreate it.
+  local image_slash="system-images/android-$api/google_apis/x86_64"
+  local image_semi="system-images;android-$api;google_apis;x86_64"
+  nohup sh -c '
+    set -e
+    "$1" sdk install "$2"
+    echo no | "$3" create avd -n "$4" -k "$5" -d "$4" --force
+  ' sh "$ANDROID_BIN" "$image_slash" "$AVDMANAGER_BIN" "$profile" "$image_semi" \
     >/tmp/emuctl-create-"$profile".log 2>&1 &
   disown
-  printf 'creating %s (pid %s)\n' "$profile" "$!"
+  printf 'creating %s (api %s, pid %s)\n' "$profile" "$api" "$!"
 }
 
 cmd_remove() {
@@ -192,12 +260,17 @@ usage() {
 emuctl - manage Android Virtual Devices via the `android` CLI
 
 Usage:
-  emuctl doctor                Check that the android CLI / adb / KVM are reachable
+  emuctl doctor                Check that the android CLI / adb / avdmanager / KVM are reachable
+  emuctl enable-devices        Install cmdline-tools so `profiles`/`create` use real
+                                device ids (pixel_6, pixel_7_pro, ...) instead of
+                                generic sizes (medium_phone, ...)
   emuctl list [--json]         List AVDs and whether each is running
-  emuctl profiles              List device profiles usable with `create`
+  emuctl profiles              List device ids/profiles usable with `create`
   emuctl start <avd> [--cold] [--headless]
   emuctl stop [<avd>]          Stop a running AVD (omit name if only one is running)
-  emuctl create <profile>      Create an AVD from a device profile (downloads as needed)
+  emuctl create <device-id-or-profile> [api-level]
+                                Create an AVD (downloads its system image as needed;
+                                api-level defaults to 34, only used with avdmanager)
   emuctl remove <avd> [--force]
   emuctl images [--json]       List system-image packages (installed + available)
   emuctl install <package>     android sdk install <package>
@@ -209,6 +282,7 @@ main() {
   [ $# -gt 0 ] && shift
   case "$cmd" in
     doctor) cmd_doctor "$@" ;;
+    enable-devices) cmd_enable_devices "$@" ;;
     list) cmd_list "$@" ;;
     profiles) cmd_profiles "$@" ;;
     start) cmd_start "$@" ;;

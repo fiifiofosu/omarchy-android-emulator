@@ -92,13 +92,21 @@ function elide(text, limit) {
   return value.length > cap ? value.substring(0, cap - 1) + "…" : value
 }
 
-// parseProfiles turns `emuctl profiles` (one name per line) into an array.
+// parseProfiles turns `emuctl profiles` into an array of {id, label}.
+//
+// Without avdmanager each line is a bare generic size ("medium_phone"), so id
+// and label are the same string. With avdmanager each line is
+// "id<TAB>Display Name" (e.g. "pixel_6\tPixel 6"), so the panel can show the
+// friendly name while `create` still gets the id.
 function parseProfiles(raw) {
   var lines = String(raw || "").split("\n")
   var out = []
   for (var i = 0; i < lines.length; i++) {
     var t = lines[i].trim()
-    if (t !== "") out.push(t)
+    if (t === "") continue
+    var tab = t.indexOf("\t")
+    if (tab === -1) out.push({ id: t, label: t })
+    else out.push({ id: t.substring(0, tab).trim(), label: t.substring(tab + 1).trim() })
   }
   return out
 }

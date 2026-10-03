@@ -61,7 +61,7 @@ Panel {
   function activateCursor() {
     if (cursor === 0) { emu.toggleProfiles(); return }
     var i = cursor - 1
-    if (i < profileRows) { emu.createFromProfile(emu.profiles[i]); return }
+    if (i < profileRows) { emu.createFromProfile(emu.profiles[i].id); return }
     i -= profileRows
     if (i >= 0 && i < emu.avds.length) emu.toggleAvd(emu.avds[i])
   }
@@ -236,10 +236,11 @@ Panel {
               model: emu.profiles
 
               ProfileRow {
-                required property string modelData
+                required property var modelData
                 required property int index
                 width: parent.width
-                profileName: modelData
+                profileId: modelData.id
+                profileLabel: modelData.label
                 rowIndex: index
               }
             }
@@ -337,7 +338,8 @@ Panel {
 
   component ProfileRow: CursorSurface {
     id: profileRow
-    property string profileName: ""
+    property string profileId: ""
+    property string profileLabel: ""
     property int rowIndex: 0
 
     readonly property bool selected: root.cursorActive && root.cursor === 1 + rowIndex
@@ -351,7 +353,7 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: root.setCursor(1 + profileRow.rowIndex)
-      onClicked: emu.createFromProfile(profileRow.profileName)
+      onClicked: emu.createFromProfile(profileRow.profileId)
     }
 
     RowLayout {
@@ -365,7 +367,7 @@ Panel {
       Text {
         textFormat: Text.PlainText
         Layout.fillWidth: true
-        text: profileRow.profileName
+        text: profileRow.profileLabel
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
