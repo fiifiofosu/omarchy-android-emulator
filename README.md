@@ -14,11 +14,14 @@ protocol (`adb`), so `emuctl` just shells out to Google's
 
 - Click the bar icon to see your AVDs and whether each is running.
 - Toggle a switch to start or stop one.
-- "New virtual device" expands a list of device profiles; picking one
-  creates an AVD, downloading whatever system image it needs. With
-  `cmdline-tools` installed (see below), this list is real hardware profiles
-  — Pixel 6, Pixel 7 Pro, Pixel Fold, etc. Without it, the `android` CLI only
-  offers generic sizes (`small_phone`, `medium_phone`, ...).
+- "New virtual device" expands into a row of cards — **Pixel / Tablet /
+  Legacy** — with avdmanager installed (see below); pick a card, then pick a
+  device from the list under it (Pixel 6, Pixel 7 Pro, Nexus 5, ...) to create
+  an AVD, downloading whatever system image it needs. There's no Samsung/OEM/
+  iPhone card: Google's SDK only ships its own reference hardware (current
+  Pixels + a few old Nexus phones), so "Legacy" is that leftover bucket, not a
+  brand. Without avdmanager, this falls back to a flat list of the `android`
+  CLI's own generic sizes (`small_phone`, `medium_phone`, ...).
 - The header's two buttons open a terminal running `emuctl doctor` (checks
   the `android` CLI, `adb`, and `/dev/kvm`) and `emuctl images` (lists
   installed/available system-image packages) — these are read/diagnostic

@@ -92,21 +92,59 @@ function elide(text, limit) {
   return value.length > cap ? value.substring(0, cap - 1) + "…" : value
 }
 
-// parseProfiles turns `emuctl profiles` into an array of {id, label}.
+// The fixed left-to-right order for the brand cards. Categories not present
+// in a given `emuctl profiles` run (e.g. an older emuctl before this existed)
+// just don't get a card.
+var CATEGORY_ORDER = ["pixel", "tablet", "legacy"]
+var CATEGORY_LABEL = { pixel: "Pixel", tablet: "Tablet", legacy: "Legacy" }
+
+// parseProfiles turns `emuctl profiles` into either a grouped or a flat
+// result, depending on what emuctl could offer:
 //
-// Without avdmanager each line is a bare generic size ("medium_phone"), so id
-// and label are the same string. With avdmanager each line is
-// "id<TAB>Display Name" (e.g. "pixel_6\tPixel 6"), so the panel can show the
-// friendly name while `create` still gets the id.
+// Without avdmanager, each line is a bare generic size ("medium_phone") with
+// no category -- there's nothing to split into cards, so this returns
+// { grouped: false, flat: [{id, label}] }.
+//
+// With avdmanager, each line is "category<TAB>id<TAB>Display Name" (e.g.
+// "pixel\tpixel_6\tPixel 6"). This returns
+// { grouped: true, categories: [...], byCategory: { pixel: [...], ... } },
+// with categories in CATEGORY_ORDER and only the ones actually present.
 function parseProfiles(raw) {
   var lines = String(raw || "").split("\n")
-  var out = []
+  var flat = []
+  var byCategory = {}
+  var grouped = false
+
   for (var i = 0; i < lines.length; i++) {
     var t = lines[i].trim()
     if (t === "") continue
-    var tab = t.indexOf("\t")
-    if (tab === -1) out.push({ id: t, label: t })
-    else out.push({ id: t.substring(0, tab).trim(), label: t.substring(tab + 1).trim() })
+    var first = t.indexOf("\t")
+    if (first === -1) { flat.push({ id: t, label: t }); continue }
+    var second = t.indexOf("\t", first + 1)
+    if (second === -1) {
+      flat.push({ id: t.substring(0, first).trim(), label: t.substring(first + 1).trim() })
+      continue
+    }
+    grouped = true
+    var cat = t.substring(0, first).trim()
+    var id = t.substring(first + 1, second).trim()
+    var label = t.substring(second + 1).trim()
+    if (!byCategory[cat]) byCategory[cat] = []
+    byCategory[cat].push({ id: id, label: label })
   }
-  return out
+
+  if (!grouped) return { grouped: false, flat: flat }
+
+  var categories = []
+  for (var c = 0; c < CATEGORY_ORDER.length; c++) {
+    if (byCategory[CATEGORY_ORDER[c]]) categories.push(CATEGORY_ORDER[c])
+  }
+  for (var k in byCategory) {
+    if (categories.indexOf(k) === -1) categories.push(k)
+  }
+  return { grouped: true, categories: categories, byCategory: byCategory }
+}
+
+function categoryLabel(cat) {
+  return CATEGORY_LABEL[cat] || cat
 }

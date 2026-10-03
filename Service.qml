@@ -14,12 +14,22 @@ Item {
 
   property var avds: []
   property var summary: Model.summarize([])
-  property var profiles: []
+  // { grouped: false, flat: [...] } or { grouped: true, categories: [...], byCategory: {...} }
+  property var profiles: ({ grouped: false, flat: [] })
+  property string selectedCategory: ""
   property bool missingBinary: false
   property bool refreshing: false
   property string lastError: ""
   property string actionStatus: ""
   property bool profilesOpen: false
+
+  // The flat list the panel actually renders under the cards: the selected
+  // category's devices when grouped, or everything when there's nothing to
+  // group.
+  readonly property var visibleProfiles: {
+    if (!profiles.grouped) return profiles.flat || []
+    return profiles.byCategory[selectedCategory] || []
+  }
 
   readonly property string emuctlPath: _emuctl
   readonly property bool ready: _emuctl !== ""
@@ -107,9 +117,13 @@ Item {
     profilesProcess.running = true
   }
 
+  function selectCategory(cat) { selectedCategory = cat }
+
+  readonly property bool profilesLoaded: profiles.grouped ? profiles.categories.length > 0 : profiles.flat.length > 0
+
   function toggleProfiles() {
     profilesOpen = !profilesOpen
-    if (profilesOpen && profiles.length === 0) loadProfiles()
+    if (profilesOpen && !profilesLoaded) loadProfiles()
   }
 
   // Doctor output and the full SDK package list are read-only and can be
@@ -214,7 +228,12 @@ Item {
     command: []
     stdout: StdioCollector { id: profilesOut; waitForEnd: true }
     onExited: function(exitCode) {
-      if (exitCode === 0) root.profiles = Model.parseProfiles(String(profilesOut.text || ""))
+      if (exitCode !== 0) return
+      var parsed = Model.parseProfiles(String(profilesOut.text || ""))
+      root.profiles = parsed
+      if (parsed.grouped && (root.selectedCategory === "" || parsed.categories.indexOf(root.selectedCategory) === -1)) {
+        root.selectedCategory = parsed.categories[0] || ""
+      }
     }
   }
 }

@@ -29,7 +29,7 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property int profileRows: emu.profilesOpen ? emu.profiles.length : 0
+  readonly property int profileRows: emu.profilesOpen ? emu.visibleProfiles.length : 0
   readonly property int rowCount: 1 + profileRows + emu.avds.length
 
   readonly property color barIconColor: emu.summary.running > 0 ? barForeground : Qt.darker(barForeground, 1.55)
@@ -61,7 +61,7 @@ Panel {
   function activateCursor() {
     if (cursor === 0) { emu.toggleProfiles(); return }
     var i = cursor - 1
-    if (i < profileRows) { emu.createFromProfile(emu.profiles[i].id); return }
+    if (i < profileRows) { emu.createFromProfile(emu.visibleProfiles[i].id); return }
     i -= profileRows
     if (i >= 0 && i < emu.avds.length) emu.toggleAvd(emu.avds[i])
   }
@@ -230,23 +230,53 @@ Panel {
           Column {
             visible: emu.profilesOpen
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(10)
 
-            Repeater {
-              model: emu.profiles
+            // The brand-style cards: one per device category (Pixel / Tablet
+            // / Legacy), laid out in a single row. There's no real
+            // Samsung/OEM/iPhone category to offer here -- avdmanager's
+            // device list is Google's own reference hardware plus a handful
+            // of old Nexus phones, nothing else -- so these three are what
+            // the SDK actually has, grouped for browsing rather than one
+            // long alphabetical list.
+            RowLayout {
+              visible: emu.profiles.grouped
+              width: parent.width
+              spacing: Style.space(8)
 
-              ProfileRow {
-                required property var modelData
-                required property int index
-                width: parent.width
-                profileId: modelData.id
-                profileLabel: modelData.label
-                rowIndex: index
+              Repeater {
+                model: emu.profiles.grouped ? emu.profiles.categories : []
+
+                CategoryCard {
+                  required property string modelData
+                  Layout.fillWidth: true
+                  category: modelData
+                  count: emu.profiles.byCategory[modelData] ? emu.profiles.byCategory[modelData].length : 0
+                  selected: emu.selectedCategory === modelData
+                }
+              }
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: emu.visibleProfiles
+
+                ProfileRow {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  profileId: modelData.id
+                  profileLabel: modelData.label
+                  rowIndex: index
+                }
               }
             }
 
             Text {
-              visible: emu.profiles.length === 0
+              visible: emu.visibleProfiles.length === 0
               textFormat: Text.PlainText
               text: "Loading profiles…"
               color: root.dim
@@ -332,6 +362,56 @@ Panel {
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
         elide: Text.ElideRight
+      }
+    }
+  }
+
+  // A brand-style card for one device category. Mouse-only (not part of the
+  // keyboard cursor chain below it) -- three cards side by side don't fit the
+  // single up/down cursor the row list already uses, and a click is the
+  // natural way to pick one anyway.
+  component CategoryCard: Rectangle {
+    id: card
+    property string category: ""
+    property int count: 0
+    property bool selected: false
+
+    implicitHeight: cardContent.implicitHeight + Style.space(16)
+    radius: Style.space(6)
+    color: selected ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
+                     : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+    border.width: selected ? 1 : 0
+    border.color: root.foreground
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: emu.selectCategory(card.category)
+    }
+
+    ColumnLayout {
+      id: cardContent
+      anchors.centerIn: parent
+      spacing: Style.space(2)
+
+      Text {
+        textFormat: Text.PlainText
+        Layout.alignment: Qt.AlignHCenter
+        text: Model.categoryLabel(card.category)
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        font.bold: card.selected
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        Layout.alignment: Qt.AlignHCenter
+        text: card.count + (card.count === 1 ? " device" : " devices")
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
     }
   }

@@ -137,6 +137,17 @@ cmd_enable_devices() {
 # the widget can show "Pixel 6" while passing "pixel_6" to `create`. Only
 # phones/tablets/foldables are listed -- avdmanager also knows about TVs,
 # Android Auto head units and Wear faces, which aren't what this widget is for.
+# Without avdmanager: bare generic sizes, one per line (no category --
+# there's nothing to group, so the widget shows them as a flat list).
+#
+# With avdmanager: "category<TAB>id<TAB>Display Name" per line. avdmanager's
+# device list is Google's own reference hardware -- there is no Samsung/
+# OEM/iPhone entry anywhere in it, OEM emulator images simply aren't
+# distributed through the Android SDK -- so "category" here means Pixel vs.
+# tablet-sized vs. everything else (older Nexus phones, antique QVGA/WVGA
+# generics), not a phone brand. TV, Wear OS, Automotive, XR and desktop form
+# factors are left out entirely; they're real avdmanager devices but not
+# something a "pick a phone" widget should offer.
 cmd_profiles() {
   if [ -z "$AVDMANAGER_BIN" ]; then
     "$ANDROID_BIN" emulator create --list-profiles
@@ -149,7 +160,12 @@ cmd_profiles() {
       sub(/".*/, "", id)
       getline name
       sub(/^ *Name: /, "", name)
-      if (id ~ /^pixel/) print id "\t" name
+      idlc = tolower(id)
+      if (idlc ~ /^(automotive|tv_|wearos|xr_|ai_glasses|desktop|resizable)/) next
+      if (idlc ~ /tablet/ || idlc == "pixel_c") cat = "tablet"
+      else if (idlc ~ /^pixel/) cat = "pixel"
+      else cat = "legacy"
+      print cat "\t" id "\t" name
     }
   '
 }
@@ -194,20 +210,26 @@ cmd_create() {
     return 0
   fi
 
-  # avdmanager available: create a real device (e.g. "pixel_6") instead of a
-  # generic size bucket. The AVD is named after the device id so repeat
-  # clicks in the widget are idempotent rather than piling up "pixel_6",
-  # "pixel_6_2", ... -- --force lets a second create just recreate it.
+  # avdmanager available: create a real device (e.g. "pixel_6", or an older
+  # one like "Nexus 7 2013" which has spaces in its device id) instead of a
+  # generic size bucket. AVD names can't contain spaces or parens the way
+  # device ids sometimes do, so the name is a sanitized copy of the id; the
+  # id itself is passed through to -d unmodified. The name is derived rather
+  # than random so repeat clicks in the widget are idempotent instead of
+  # piling up "pixel_6", "pixel_6_2", ... -- --force lets a second create
+  # just recreate it.
+  local name
+  name="$(printf '%s' "$profile" | tr -cs 'A-Za-z0-9._-' '_')"
   local image_slash="system-images/android-$api/google_apis/x86_64"
   local image_semi="system-images;android-$api;google_apis;x86_64"
   nohup sh -c '
     set -e
     "$1" sdk install "$2"
-    echo no | "$3" create avd -n "$4" -k "$5" -d "$4" --force
-  ' sh "$ANDROID_BIN" "$image_slash" "$AVDMANAGER_BIN" "$profile" "$image_semi" \
-    >/tmp/emuctl-create-"$profile".log 2>&1 &
+    echo no | "$3" create avd -n "$4" -k "$5" -d "$6" --force
+  ' sh "$ANDROID_BIN" "$image_slash" "$AVDMANAGER_BIN" "$name" "$image_semi" "$profile" \
+    >/tmp/emuctl-create-"$name".log 2>&1 &
   disown
-  printf 'creating %s (api %s, pid %s)\n' "$profile" "$api" "$!"
+  printf 'creating %s (api %s, pid %s)\n' "$name" "$api" "$!"
 }
 
 cmd_remove() {
