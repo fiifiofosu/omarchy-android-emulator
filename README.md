@@ -71,6 +71,31 @@ omarchy plugin enable io.github.fiifiofosu.android-emulator
 omarchy bar move io.github.fiifiofosu.android-emulator
 ```
 
+## Hyprland: float the emulator window (recommended)
+
+Without a window rule, Hyprland tiles the emulator like any other window --
+as the sole/largest tile it ends up filling most of the screen, with the
+actual phone content letterboxed in black. This installer deliberately does
+not edit your Hyprland config for you (that's config Omarchy leaves to you
+to opt into), so add this yourself to `~/.config/hypr/hyprland.lua`:
+
+```lua
+-- Android Emulator: float it with a phone-shaped size instead of tiling.
+-- Floating is matched on class alone (not the full title) because the
+-- window is created titled just "Emulator" and only renames itself to
+-- "Android Emulator - <avd>:<port>" after the guest boots -- a title-only
+-- match would race that rename and intermittently miss the window.
+o.window({ class = "^Emulator$" }, { float = true })
+o.window({ class = "^Emulator$", title = "^Android Emulator - .*$" }, {
+  center = true,
+  size = { 420, 900 },
+})
+```
+
+Apply it with `hyprctl reload` (or it picks up on next save, per Hyprland's
+usual hot-reload). This only affects windows going forward -- an emulator
+that's already running needs a restart to pick it up.
+
 ## emuctl
 
 The widget's backend is a standalone script, usable on its own:
