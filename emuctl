@@ -211,6 +211,23 @@ cmd_stop() {
 # License prompts are answered with `yes` rather than left to the terminal:
 # a backgrounded/non-interactive caller has no stdin to answer them with, and
 # the install would otherwise hang or silently decline.
+#
+# Piping `yes` into a command that doesn't read all of its output (e.g.
+# `sdk install` on a package that's already installed, which exits almost
+# immediately with nothing to confirm) gets `yes` killed by SIGPIPE. Under
+# `pipefail` that counts as the pipeline failing even though the real command
+# succeeded, which `set -e` then treats as a hard error -- the script dies
+# instantly, before printing anything, which is exactly the "says creating
+# and then nothing, AVD never appears" symptom this works around: only the
+# real command's exit status is checked, not yes's.
+run_with_yes() {
+  set +o pipefail
+  yes | "$@"
+  local status=${PIPESTATUS[1]}
+  set -o pipefail
+  return "$status"
+}
+
 cmd_create() {
   local profile="${1:?usage: emuctl create <device-id-or-profile> [api-level]}"
   local api="${2:-34}"
@@ -219,7 +236,7 @@ cmd_create() {
     # No avdmanager: fall back to the `android` CLI's own generic profile
     # (small_phone, medium_phone, ...), which auto-picks everything itself.
     printf 'Creating %s (downloads as needed)...\n' "$profile"
-    yes | "$ANDROID_BIN" emulator create "$profile"
+    run_with_yes "$ANDROID_BIN" emulator create "$profile"
     printf '%s\n' "$profile"
     return 0
   fi
@@ -237,9 +254,13 @@ cmd_create() {
   local image_slash="system-images/android-$api/google_apis/x86_64"
   local image_semi="system-images;android-$api;google_apis;x86_64"
   printf 'Downloading system image android-%s google_apis x86_64 (this can take a few minutes)...\n' "$api"
-  yes | "$ANDROID_BIN" sdk install "$image_slash"
+  run_with_yes "$ANDROID_BIN" sdk install "$image_slash"
   printf 'Creating AVD %s (%s)...\n' "$name" "$profile"
+  set +o pipefail
   echo no | "$AVDMANAGER_BIN" create avd -n "$name" -k "$image_semi" -d "$profile" --force
+  local avdmanager_status=${PIPESTATUS[1]}
+  set -o pipefail
+  [ "$avdmanager_status" -eq 0 ] || exit "$avdmanager_status"
   printf '%s\n' "$name"
 }
 
