@@ -1,5 +1,7 @@
 # Android Emulator (Omarchy widget)
 
+<img width="831" height="872" alt="screenshot-2026-10-05_21-50-37" src="https://github.com/user-attachments/assets/9e3c7005-62ad-41f0-82dc-03ebbf42488f" />
+
 Android Virtual Devices in the Omarchy bar, in the same shape as
 [omarchy-dbforge](https://github.com/fiifiofosu/omarchy-dbforge): a small CLI
 does the real work, a QML bar widget polls it and renders a panel.
