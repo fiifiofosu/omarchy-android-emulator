@@ -35,6 +35,8 @@ Item {
   readonly property bool ready: _emuctl !== ""
   readonly property bool busy: actionProcess.running || createProcess.running
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 8, 2, 3600)
+  readonly property var reversePorts: Model.parsePorts(setting("reversePorts", "8081"))
+  readonly property bool notifyOnReady: setting("notifyOnReady", true) === true
 
   property bool creating: false
   property int creatingElapsedSec: 0
@@ -87,10 +89,51 @@ Item {
       lastError = parsed.error
       return
     }
+    noticeTransitions(parsed.avds)
     avds = parsed.avds
     summary = Model.summarize(parsed.avds)
     missingBinary = false
     lastError = ""
+    // Boots started from anywhere (a terminal, Android Studio) get the same
+    // quick polling as ones started here, so "booting…" flips to "running"
+    // within a couple of seconds instead of a full refresh interval.
+    if (summary.booting > 0 && !settleTimer.running) {
+      settleTimer.ticks = 0
+      settleTimer.restart()
+    }
+  }
+
+  // Status per AVD id as of the previous poll. Empty until the first poll,
+  // so whatever is already running when the shell starts isn't announced.
+  property var _lastStatus: ({})
+
+  function noticeTransitions(next) {
+    var prev = _lastStatus
+    var seen = {}
+    var first = Object.keys(prev).length === 0
+    for (var i = 0; i < next.length; i++) {
+      var avd = next[i]
+      seen[avd.id] = avd.status
+      var was = prev[avd.id]
+      if (first || was === undefined || was === avd.status) continue
+      if (avd.status === "running") onBecameReady(avd)
+      else if (avd.status === "failed") notify(avd.id + " failed to start", avd.error)
+    }
+    _lastStatus = seen
+  }
+
+  // `adb reverse` mappings die with the emulator, so they're re-applied on
+  // every boot rather than once -- otherwise Metro silently stops reaching
+  // the app after any restart.
+  function onBecameReady(avd) {
+    if (notifyOnReady) notify(avd.id + " is ready", "emulator-" + avd.port)
+    if (reversePorts.length > 0) {
+      runDevice([_emuctl, "reverse", avd.id].concat(reversePorts), "", "")
+    }
+  }
+
+  function notify(title, body) {
+    Quickshell.execDetached(["notify-send", "-a", "Android Emulator", title, body || ""])
   }
 
   function start(id) { runAction([_emuctl, "start", id], "Starting " + id + "…") }
@@ -98,7 +141,7 @@ Item {
 
   function toggleAvd(avd) {
     if (!avd || busy) return
-    if (Model.isRunning(avd)) stop(avd.id)
+    if (Model.isActive(avd)) stop(avd.id)
     else start(avd.id)
   }
 
@@ -107,7 +150,7 @@ Item {
   // racing the two.
   function removeAvd(avd) {
     if (!avd || busy) return
-    if (Model.isRunning(avd)) {
+    if (Model.isActive(avd)) {
       runAction([_emuctl, "stop", avd.id], "Stopping " + avd.id + " before delete…")
       _pendingRemoval = avd.id
       return
@@ -180,6 +223,55 @@ Item {
   }
 
   function openDoctor() { openInTerminal(["doctor"]) }
+  function openLogcat(avd) { if (Model.isReady(avd)) openInTerminal(["logcat", avd.id]) }
+
+  // Actions on a booted device. These go through their own queue rather
+  // than runAction(): they don't change AVD state, so they shouldn't block
+  // (or be blocked by) a start/stop, and an APK install sits in a file picker
+  // for as long as the user takes to choose.
+  function focusWindow(avd) {
+    if (Model.isReady(avd)) runDevice([_emuctl, "focus", avd.id], "", "")
+  }
+  function screenshot(avd) {
+    if (Model.isReady(avd)) runDevice([_emuctl, "screenshot", avd.id], "Capturing " + avd.id + "…", "Screenshot copied")
+  }
+  function installApk(avd) {
+    if (Model.isReady(avd)) runDevice([_emuctl, "apk", avd.id], "Installing APK on " + avd.id + "…", avd.id)
+  }
+  function reverseMetro(avd) {
+    if (!Model.isReady(avd)) return
+    var ports = reversePorts.length > 0 ? reversePorts : ["8081"]
+    runDevice([_emuctl, "reverse", avd.id].concat(ports), "", avd.id)
+  }
+
+  property var _deviceQueue: []
+  property var _deviceCurrent: null
+
+  // notifyTitle "" means "only speak up on failure" (focus, automatic
+  // reverse on boot); otherwise success is announced with emuctl's last
+  // stdout line as the body.
+  function runDevice(command, message, notifyTitle) {
+    if (!ready) return
+    _deviceQueue = _deviceQueue.concat([{ command: command, message: message, notifyTitle: notifyTitle }])
+    _nextDevice()
+  }
+
+  function _nextDevice() {
+    if (deviceProcess.running || _deviceQueue.length === 0) return
+    _deviceCurrent = _deviceQueue[0]
+    _deviceQueue = _deviceQueue.slice(1)
+    if (_deviceCurrent.message !== "") flashStatus(_deviceCurrent.message, false)
+    deviceProcess.command = _deviceCurrent.command
+    deviceProcess.running = true
+  }
+
+  // A short-lived status/error line for device actions, cleared on its own:
+  // these don't change any row, so nothing else would ever clear it.
+  function flashStatus(text, isError) {
+    if (isError) { lastError = text; actionStatus = "" }
+    else { actionStatus = text; lastError = "" }
+    flashTimer.restart()
+  }
   function openSdkManager() { openInTerminal(["images"]) }
 
   Component.onCompleted: resolveBinary()
@@ -187,6 +279,42 @@ Item {
   onSettingsChanged: {
     _resolved = false
     resolveBinary()
+  }
+
+  Timer {
+    id: flashTimer
+    interval: 5000
+    onTriggered: {
+      if (!root.busy) root.actionStatus = ""
+      root.lastError = ""
+    }
+  }
+
+  Process {
+    id: deviceProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: deviceOut; waitForEnd: true }
+    stderr: StdioCollector { id: deviceErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var job = root._deviceCurrent
+      root._deviceCurrent = null
+      var out = String(deviceOut.text || "").trim().split("\n").pop()
+      if (exitCode === 0) {
+        if (job && job.notifyTitle !== "") root.notify(job.notifyTitle, out)
+        if (job && job.message !== "") root.flashStatus(out !== "" ? out : "Done", false)
+      } else {
+        var err = String(deviceErr.text || "").trim().split("\n").pop().replace(/^emuctl: /, "")
+        // Closing the APK picker is a choice, not an error worth a toast.
+        if (err !== "no APK chosen") {
+          root.flashStatus(Model.elide(err || "Command failed"), true)
+          root.notify("Android Emulator", err || "Command failed")
+        } else {
+          root.actionStatus = ""
+        }
+      }
+      root._nextDevice()
+    }
   }
 
   Timer {
@@ -210,9 +338,14 @@ Item {
     onTriggered: {
       ticks += 1
       root.refresh()
-      // 60s: a cold emulator boot (common right after `create`) can take well
-      // past DBForge's container-sized settle window.
-      if (ticks >= 30) { ticks = 0; running = false; root.actionStatus = "" }
+      // At least 60s after an action, and for as long as an AVD is still
+      // starting/booting (a cold boot right after `create` can take
+      // minutes), capped at 10 minutes so a boot that hangs forever doesn't
+      // mean polling every 2s forever.
+      if ((ticks >= 30 && root.summary.booting === 0) || ticks >= 300) {
+        ticks = 0
+        running = false
+      }
     }
   }
 
@@ -266,6 +399,9 @@ Item {
         actionProcess.running = true
         return
       }
+      // The row itself shows starting/booting/stopped from here on, so the
+      // "Starting x…" line has done its job.
+      if (exitCode === 0) root.actionStatus = ""
       settleTimer.ticks = 0
       settleTimer.restart()
       root.refresh()

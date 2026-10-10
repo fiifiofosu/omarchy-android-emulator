@@ -32,7 +32,7 @@ Panel {
   readonly property int profileRows: emu.profilesOpen ? emu.visibleProfiles.length : 0
   readonly property int rowCount: 1 + profileRows + emu.avds.length
 
-  readonly property color barIconColor: emu.summary.running > 0 ? barForeground : Qt.darker(barForeground, 1.55)
+  readonly property color barIconColor: emu.summary.active > 0 ? barForeground : Qt.darker(barForeground, 1.55)
 
   readonly property string tooltip: {
     if (emu.missingBinary) return "Android Emulator: emuctl not found"
@@ -56,6 +56,12 @@ Panel {
     cursorActive = true
     cursor = index
     clampCursor()
+  }
+
+  // The AVD under the keyboard cursor, if the cursor is on an AVD row.
+  function cursorAvd() {
+    var i = cursor - 1 - profileRows
+    return i >= 0 && i < emu.avds.length ? emu.avds[i] : null
   }
 
   function activateCursor() {
@@ -103,14 +109,25 @@ Panel {
     bar: root.bar
     slotSize: Style.bar.statusSlot
     tooltipText: root.tooltip
-    active: emu.summary.running > 0
+    active: emu.summary.active > 0
     iconComponent: Component {
       Item {
+        // Breathes while an AVD is starting/booting, so a boot can be
+        // watched from the bar without opening the panel. alwaysRunToEnd
+        // lets the last cycle finish, so it always settles back at 1.0.
+        SequentialAnimation on opacity {
+          running: emu.summary.booting > 0
+          loops: Animation.Infinite
+          alwaysRunToEnd: true
+          NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutQuad }
+          NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutQuad }
+        }
+
         AndroidIcon {
           anchors.centerIn: parent
           iconSize: Style.space(13)
           color: button.active ? button.activeColor : root.barIconColor
-          opacity: emu.summary.running > 0 ? 1.0 : 0.6
+          opacity: emu.summary.active > 0 ? 1.0 : 0.6
         }
       }
     }
@@ -144,9 +161,17 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         var key = String(t || "").toLowerCase()
+        var avd = root.cursorActive ? root.cursorAvd() : null
         if (key === "r") emu.refresh()
         else if (key === "d") emu.openDoctor()
         else if (key === "s") emu.openSdkManager()
+        // Per-device keys act on the AVD under the cursor (ready ones only;
+        // the Service ignores the rest).
+        else if (key === "f") emu.focusWindow(avd)
+        else if (key === "c") emu.screenshot(avd)
+        else if (key === "i") emu.installApk(avd)
+        else if (key === "m") emu.reverseMetro(avd)
+        else if (key === "l") emu.openLogcat(avd)
       }
 
       // No single Flickable around everything: the header (hero, status
@@ -478,6 +503,13 @@ Panel {
     }
   }
 
+  component DeviceAction: PanelActionButton {
+    foreground: root.dim
+    hoverColor: root.foreground
+    fontFamily: root.fontFamily
+    fontSize: Style.font.bodySmall
+  }
+
   component AvdRow: CursorSurface {
     id: avdRow
     property var avd: null
@@ -524,10 +556,45 @@ Panel {
           textFormat: Text.PlainText
           Layout.fillWidth: true
           text: Model.rowMeta(avdRow.avd)
-          color: root.dim
+          color: avdRow.avd && avdRow.avd.status === "failed" ? root.urgent : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
+        }
+
+        // Things to do with a booted device. Only shown once it's actually
+        // ready -- before that adb can see it but can't screencap/install.
+        // Each has a letter key when the row has the keyboard cursor.
+        RowLayout {
+          visible: Model.isReady(avdRow.avd)
+          spacing: Style.space(2)
+          Layout.topMargin: Style.space(2)
+
+          DeviceAction {
+            iconText: "󰈈"
+            tooltipText: "Show window (f)"
+            onClicked: emu.focusWindow(avdRow.avd)
+          }
+          DeviceAction {
+            iconText: "󰄀"
+            tooltipText: "Screenshot to clipboard + ~/Pictures (c)"
+            onClicked: emu.screenshot(avdRow.avd)
+          }
+          DeviceAction {
+            iconText: "󰏔"
+            tooltipText: "Install APK (i)"
+            onClicked: emu.installApk(avdRow.avd)
+          }
+          DeviceAction {
+            iconText: "󰓡"
+            tooltipText: "adb reverse " + (emu.reversePorts.length > 0 ? emu.reversePorts.join(", ") : "8081") + " for Metro (m)"
+            onClicked: emu.reverseMetro(avdRow.avd)
+          }
+          DeviceAction {
+            iconText: "󰆍"
+            tooltipText: "Logcat in a terminal (l)"
+            onClicked: emu.openLogcat(avdRow.avd)
+          }
         }
       }
 
@@ -541,7 +608,7 @@ Panel {
       }
 
       ToggleSwitch {
-        checked: Model.isRunning(avdRow.avd)
+        checked: Model.isActive(avdRow.avd)
         busy: emu.busy
         hasCursor: avdRow.selected
         foreground: root.foreground

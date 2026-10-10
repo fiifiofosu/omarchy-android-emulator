@@ -14,8 +14,26 @@ protocol (`adb`), so `emuctl` just shells out to Google's
 
 ## What it does
 
-- Click the bar icon to see your AVDs and whether each is running.
+- Click the bar icon to see your AVDs and what each is doing: **stopped**,
+  **starting** (emulator process up, not on adb yet), **booting** (on adb,
+  Android still coming up), **running** (booted and usable), or **failed**
+  (the emulator died before it finished booting, with the reason when
+  there is one). The bar icon pulses while anything is booting, and you get
+  a desktop notification when a device is ready or a start fails.
 - Toggle a switch to start or stop one.
+- A running device's row has quick actions (each also has a key when the
+  row has the keyboard cursor):
+  - **Show window** (`f`) focuses the emulator window, even on another workspace.
+  - **Screenshot** (`c`) saves a PNG next to Omarchy's own screenshots and
+    copies it to the clipboard.
+  - **Install APK** (`i`) opens a file picker in `~/Downloads`.
+  - **Metro** (`m`) runs `adb reverse tcp:8081`, so an app on the emulator
+    can reach a dev server on `localhost`.
+  - **Logcat** (`l`) opens `adb logcat` in a terminal.
+- `adb reverse` mappings don't survive an emulator restart, so the ports in
+  the widget's **adb reverse ports** setting (default `8081`) are
+  re-applied automatically every time a device finishes booting. Clear the
+  setting to turn this off.
 - "New virtual device" expands into a row of cards — **Pixel / Tablet /
   Legacy** — with avdmanager installed (see below); pick a card, then pick a
   device from the list under it (Pixel 6, Pixel 7 Pro, Nexus 5, ...) to create
@@ -117,10 +135,18 @@ The widget's backend is a standalone script, usable on its own:
 ```
 emuctl doctor                 Check that android CLI / adb / avdmanager / KVM are reachable
 emuctl enable-devices         Install cmdline-tools for real device ids (pixel_6, ...)
-emuctl list [--json]          List AVDs and whether each is running
+emuctl list [--json]          List AVDs and their state (stopped / starting /
+                               booting / running / failed)
 emuctl profiles               List device ids/profiles usable with `create`
 emuctl start <avd> [--cold] [--headless]
 emuctl stop [<avd>]           Stop a running AVD (omit name if only one is running)
+emuctl focus <avd>            Raise the AVD's emulator window (Hyprland)
+emuctl screenshot <avd>       Save a screenshot to ~/Pictures and copy it to the clipboard
+emuctl apk <avd> [file.apk]   Install an APK (no file: pick one from ~/Downloads)
+emuctl reverse <avd> [port...]
+                               adb reverse each port to the host (default: 8081, Metro)
+emuctl logcat <avd> [args...]
+emuctl shell <avd> [command...]
 emuctl create <device-id-or-profile> [api-level]
                                Create an AVD (downloads its system image as needed;
                                api-level defaults to 34, only used with avdmanager)
@@ -128,6 +154,9 @@ emuctl remove <avd> [--force]
 emuctl images [--json]        List system-image packages (installed + available)
 emuctl install <package>      android sdk install <package>
 ```
+
+The per-device commands make handy Hyprland keybindings without opening the
+panel, e.g. `emuctl screenshot pixel_6` or `emuctl focus pixel_6`.
 
 ## Known issues
 

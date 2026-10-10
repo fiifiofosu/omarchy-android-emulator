@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.fiifiofosu.android-emulator",
   "name": "Android Emulator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Ebenezer Nana Ofosu",
   "license": "MIT",
-  "description": "Android Virtual Devices in the Omarchy bar: list, start/stop, create new AVDs, and jump into SDK management.",
+  "description": "Android Virtual Devices in the Omarchy bar: start/stop with live boot state, create new AVDs, and screenshot, install APKs, reverse Metro and tail logcat on running ones.",
   "kinds": [
     "bar-widget"
   ],
@@ -20,7 +20,9 @@
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 8,
-      "emuctlPath": ""
+      "emuctlPath": "",
+      "reversePorts": "8081",
+      "notifyOnReady": true
     },
     "schema": [
       {
@@ -39,6 +41,20 @@
         "label": "emuctl binary",
         "defaultValue": "",
         "description": "Leave empty to search ~/.local/bin, /usr/local/bin, /usr/bin and $PATH."
+      },
+      {
+        "key": "reversePorts",
+        "type": "string",
+        "label": "adb reverse ports",
+        "defaultValue": "8081",
+        "description": "Ports forwarded from each emulator to this machine (adb reverse) every time one finishes booting, e.g. \"8081\" for Metro or \"8081, 3000\". Leave empty to turn off."
+      },
+      {
+        "key": "notifyOnReady",
+        "type": "boolean",
+        "label": "Notify when ready",
+        "defaultValue": true,
+        "description": "Send a desktop notification when an emulator finishes booting. Failed starts are always notified."
       }
     ]
   }

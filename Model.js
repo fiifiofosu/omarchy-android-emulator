@@ -31,41 +31,70 @@ function parseList(raw) {
       id: String(it.id),
       detail: String(it.detail || ""),
       status: String(it.status || "stopped"),
-      port: Number(it.port || 0)
+      port: Number(it.port || 0),
+      serial: String(it.serial || ""),
+      error: String(it.error || "")
     })
   }
   return { ok: true, avds: sortForDisplay(out) }
 }
 
-// sortForDisplay puts running AVDs first, then alphabetically, so the list
-// does not reshuffle between refreshes.
+// sortForDisplay puts live AVDs (starting, booting or running) first, then
+// alphabetically, so the list does not reshuffle between refreshes.
 function sortForDisplay(avds) {
   var copy = (avds || []).slice()
   copy.sort(function(a, b) {
-    var r = (b.status === "running" ? 1 : 0) - (a.status === "running" ? 1 : 0)
+    var r = (isActive(b) ? 1 : 0) - (isActive(a) ? 1 : 0)
     if (r !== 0) return r
     return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)
   })
   return copy
 }
 
-function isRunning(avd) {
+// emuctl reports one of: stopped, starting (qemu is up, adb can't see it
+// yet), booting (on adb, Android not done booting), running (booted and
+// usable), failed (a start died before reaching running).
+//
+// isActive is "there's an emulator process for this AVD" -- what the toggle
+// shows as on, and what a click stops. isReady is the narrower "booted", the
+// only state where adb-driven actions (screenshot, APK install, ...) work.
+function isActive(avd) {
+  return !!avd && (avd.status === "running" || avd.status === "booting" || avd.status === "starting")
+}
+
+function isReady(avd) {
   return !!avd && avd.status === "running"
 }
 
+function isTransitional(avd) {
+  return !!avd && (avd.status === "booting" || avd.status === "starting")
+}
+
 function summarize(avds) {
-  var running = 0, stopped = 0
+  var running = 0, booting = 0, failed = 0, stopped = 0
   for (var i = 0; i < (avds || []).length; i++) {
-    if (isRunning(avds[i])) running += 1
+    var s = avds[i].status
+    if (s === "running") running += 1
+    else if (isTransitional(avds[i])) booting += 1
+    else if (s === "failed") failed += 1
     else stopped += 1
   }
-  return { running: running, stopped: stopped, total: (avds || []).length }
+  return {
+    running: running,
+    booting: booting,
+    failed: failed,
+    stopped: stopped,
+    active: running + booting,
+    total: (avds || []).length
+  }
 }
 
 function summaryText(summary, offline) {
   if (offline) return "android CLI not found"
   if (!summary || summary.total === 0) return "No AVDs yet"
   var parts = [summary.running + " running"]
+  if (summary.booting > 0) parts.push(summary.booting + " booting")
+  if (summary.failed > 0) parts.push(summary.failed + " failed")
   if (summary.stopped > 0) parts.push(summary.stopped + " stopped")
   return parts.join(" · ")
 }
@@ -74,15 +103,30 @@ function summaryText(summary, offline) {
 // there is nothing worth a click.
 function barLabel(summary, offline) {
   if (offline) return ""
-  if (!summary || summary.running === 0) return ""
-  return String(summary.running)
+  if (!summary || summary.active === 0) return ""
+  return String(summary.active)
 }
 
 // rowMeta is the dim second line of an AVD row.
 function rowMeta(avd) {
   if (!avd) return ""
   if (avd.status === "running" && avd.port > 0) return "running · emulator-" + avd.port
+  if (avd.status === "booting" && avd.port > 0) return "booting… · emulator-" + avd.port
+  if (avd.status === "starting") return "starting…"
+  if (avd.status === "failed") return "failed: " + (avd.error || "emulator exited")
   return avd.status
+}
+
+// parsePorts turns the "reversePorts" setting ("8081, 19000") into a list of
+// valid TCP port strings, dropping anything that isn't one.
+function parsePorts(value) {
+  var out = []
+  var parts = String(value || "").split(/[\s,]+/)
+  for (var i = 0; i < parts.length; i++) {
+    var n = parseInt(parts[i], 10)
+    if (isFinite(n) && n > 0 && n < 65536 && String(n) === parts[i]) out.push(String(n))
+  }
+  return out
 }
 
 // elide keeps a command's error output to something a panel can show.

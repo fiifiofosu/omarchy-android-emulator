@@ -20,7 +20,23 @@ ANDROID_BIN="$(find_android_bin)"
 die() { printf 'emuctl: %s\n' "$*" >&2; exit 1; }
 [ -n "$ANDROID_BIN" ] || die "the 'android' CLI is not installed (see https://developer.android.com/tools/agents/android-cli/download)"
 
-sdk_root() { "$ANDROID_BIN" info sdk 2>/dev/null || true; }
+# `android info sdk` costs ~2s (the CLI is slow to start) and every command
+# needs the answer to find adb/avdmanager, so it's resolved once per run and
+# cached across runs; the cache is only trusted while the directory exists.
+SDK_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/emuctl/sdk-root"
+SDK_ROOT=""
+sdk_root() {
+  if [ -z "$SDK_ROOT" ]; then
+    SDK_ROOT="$(cat "$SDK_CACHE" 2>/dev/null || true)"
+    if [ -z "$SDK_ROOT" ] || [ ! -d "$SDK_ROOT" ]; then
+      SDK_ROOT="$("$ANDROID_BIN" info sdk 2>/dev/null || true)"
+      if [ -n "$SDK_ROOT" ]; then
+        mkdir -p "$(dirname "$SDK_CACHE")" && printf '%s\n' "$SDK_ROOT" > "$SDK_CACHE"
+      fi
+    fi
+  fi
+  printf '%s\n' "$SDK_ROOT"
+}
 
 find_adb() {
   local root
@@ -54,16 +70,70 @@ json_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\r'/}"
+  s="${s//$'\n'/\\n}"
   printf '%s' "$s"
 }
 
-# Prints "serial<TAB>avdname" for every running emulator, one per line.
+# Per-AVD start logs live here. A log's existence doubles as the "a start was
+# requested and hasn't reached ready yet" marker -- see avd_state.
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/emuctl"
+
+# Prints "serial<TAB>avdname<TAB>state" for every emulator adb can see, one
+# per line. adb lists an emulator (as "offline", then "device") well before
+# Android has finished booting -- ~15s of a ~20s warm boot -- so "ready" is
+# keyed on sys.boot_completed rather than on merely being listed.
 running_map() {
   [ -n "$ADB_BIN" ] || return 0
   "$ADB_BIN" devices 2>/dev/null | awk '/^emulator-/ {print $1}' | while read -r serial; do
-    name=$("$ADB_BIN" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r')
-    [ -n "$name" ] && printf '%s\t%s\n' "$serial" "$name"
+    name=$(timeout 3 "$ADB_BIN" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r')
+    [ -n "$name" ] || continue
+    local state=booting
+    if [ "$(timeout 3 "$ADB_BIN" -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; then
+      state=ready
+    fi
+    printf '%s\t%s\t%s\n' "$serial" "$name" "$state"
   done
+}
+
+# The emulator's qemu process is launched as `qemu-system-x86_64 @<avd> ...`,
+# so its presence is visible before adb can see the device at all -- and,
+# unlike the `android emulator start` wrapper's pid, it's the process whose
+# death actually means the emulator is gone.
+qemu_alive() {
+  local re="${1//./\\.}"
+  pgrep -f -- "qemu-system[^ ]* (.* )?@${re}( |\$)" >/dev/null 2>&1
+}
+
+# Best single-line explanation of why a start never reached adb: the
+# `android emulator start` wrapper's own last words if it said anything
+# besides its progress spinner, else the last FATAL entry in the emulator's
+# own "LEVEL | message" log. Only FATAL/PANIC: that log accumulates across
+# runs and a perfectly healthy boot writes plenty of ERROR lines (GL context
+# churn, "stop: Not implemented", ...), so those would point at the wrong
+# culprit.
+start_error() {
+  local name="$1" log="$STATE_DIR/$1.log" emu_log="$HOME/.android/$1/emulator.log" line=""
+  if [ -f "$log" ]; then
+    line="$(tr '\r' '\n' < "$log" | grep -vE '^(Waiting for virtual device|Emulator process [0-9]+ started)' \
+      | grep -vE '^[[:space:]]*$' | grep -v '^Fontconfig ' | tail -n1 || true)"
+  fi
+  if [ -z "$line" ] && [ -f "$emu_log" ]; then
+    line="$(grep -E '^(FATAL|PANIC) *\|' "$emu_log" | tail -n1 | sed -E 's/^[A-Z]+ *\| *//' || true)"
+  fi
+  printf '%s' "${line:-emulator exited before it finished booting (see ~/.android/$name/emulator.log)}"
+}
+
+# Resolves an AVD name (or an emulator-NNNN serial, passed through) to the
+# serial adb knows it by; dies if it isn't running.
+require_serial() {
+  local target="${1:?missing AVD name}"
+  case "$target" in emulator-*) printf '%s\n' "$target"; return 0 ;; esac
+  local serial
+  serial="$(running_map | awk -F'\t' -v n="$target" '$2 == n {print $1; exit}')"
+  [ -n "$serial" ] || die "$target is not running"
+  printf '%s\n' "$serial"
 }
 
 # ---- commands -----------------------------------------------------------
@@ -97,20 +167,43 @@ cmd_list() {
     local name
     name="$(awk '{print $1}' <<< "$line")"
     [ -z "$name" ] && continue
-    local status="stopped" port=0
-    while IFS=$'\t' read -r s n; do
+    local status="" port=0 serial="" error=""
+    while IFS=$'\t' read -r s n st; do
       if [ "$n" = "$name" ]; then
-        status="running"
+        serial="$s"
         port="${s#emulator-}"
+        if [ "$st" = ready ]; then status="running"; else status="booting"; fi
         break
       fi
     done <<< "$running"
+    [ -n "$status" ] || status="$(avd_state "$name")"
+    if [ "$status" = failed ]; then error="$(start_error "$name")"; fi
+    # Reached ready: the start marker has done its job.
+    [ "$status" = running ] && rm -f "$STATE_DIR/$name.log"
     $first || printf ','
     first=false
-    printf '{"id":"%s","detail":"%s","status":"%s","port":%s}' \
-      "$(json_escape "$name")" "$(json_escape "$line")" "$status" "${port:-0}"
+    printf '{"id":"%s","detail":"%s","status":"%s","port":%s,"serial":"%s","error":"%s"}' \
+      "$(json_escape "$name")" "$(json_escape "$line")" "$status" "${port:-0}" \
+      "$serial" "$(json_escape "$error")"
   done <<< "$raw"
   printf ']\n'
+}
+
+# State of an AVD adb can't see yet: "starting" while its qemu process is up
+# (or within a short grace period after `emuctl start`, before qemu has even
+# spawned), "failed" if a start was requested and the emulator is gone
+# without ever reaching ready, else "stopped". A failure is only reported for
+# ten minutes -- after that it's old news, not something to keep flagging.
+avd_state() {
+  local name="$1" log="$STATE_DIR/$1.log"
+  if qemu_alive "$name"; then printf 'starting'; return; fi
+  if [ -f "$log" ]; then
+    local age=$(( $(date +%s) - $(stat -c %Y "$log") ))
+    if [ "$age" -lt 20 ]; then printf 'starting'; return; fi
+    if [ "$age" -lt 600 ]; then printf 'failed'; return; fi
+    rm -f "$log"
+  fi
+  printf 'stopped'
 }
 
 cmd_doctor() {
@@ -189,15 +282,119 @@ cmd_start() {
   $headless && flags+=(--headless)
   # `android emulator start` blocks until the AVD is fully booted, which is
   # too long to hold the widget's action process open, so it's launched
-  # detached and the widget finds out it's up via the next `list` poll.
+  # detached and the widget finds out it's up via the next `list` poll. Its
+  # log is also the start marker `list` uses to tell "still starting" from
+  # "died on the way up" (see avd_state).
+  mkdir -p "$STATE_DIR"
   nohup "$ANDROID_BIN" emulator start "${flags[@]}" "$name" \
-    >/tmp/emuctl-start-"$name".log 2>&1 &
+    >"$STATE_DIR/$name.log" 2>&1 &
   disown
   printf 'starting %s (pid %s)\n' "$name" "$!"
 }
 
 cmd_stop() {
-  "$ANDROID_BIN" emulator stop "$@"
+  local name="${1:-}"
+  [ -n "$name" ] && rm -f "$STATE_DIR/$name.log"
+  local status=0
+  "$ANDROID_BIN" emulator stop "$@" || status=$?
+  [ -n "$name" ] || return "$status"
+  # Before Android has finished booting, `android emulator stop` returns 0
+  # without stopping anything (and before adb can see the device at all, it
+  # fails outright) -- so success is judged by the qemu process actually
+  # going away, and if it hasn't, that process is ended directly.
+  local pattern="qemu-system[^ ]* (.* )?@${name//./\\.}( |\$)" i
+  for i in 1 2 3; do qemu_alive "$name" || return 0; sleep 1; done
+  pkill -TERM -f -- "$pattern" || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do qemu_alive "$name" || return 0; sleep 1; done
+  pkill -KILL -f -- "$pattern" || true
+  sleep 1
+  ! qemu_alive "$name"
+}
+
+# ---- per-device actions (running AVDs) ----------------------------------
+
+# Raises the AVD's emulator window. Matched by the ":<port>" suffix of its
+# title ("Android Emulator - pixel_6:5554") so the separate "Emulator"
+# toolbar window isn't picked by mistake. Newer Hyprland takes Lua for
+# dispatch, older takes the classic syntax -- try the former, fall back.
+cmd_focus() {
+  local serial
+  serial="$(require_serial "${1:?usage: emuctl focus <avd>}")"
+  command -v hyprctl >/dev/null 2>&1 || die "focus needs Hyprland (hyprctl)"
+  local addr
+  addr="$(hyprctl clients -j | jq -r --arg p ":${serial#emulator-}" \
+    '.[] | select((.title // "") as $t | ($t | startswith("Android Emulator - ")) and ($t | endswith($p))) | .address' | head -n1)"
+  [ -n "$addr" ] || die "$1 has no window (started --headless?)"
+  if [ "$(hyprctl dispatch "hl.dsp.focus({ window = \"address:$addr\" })" 2>/dev/null)" != ok ]; then
+    hyprctl dispatch focuswindow "address:$addr" >/dev/null
+  fi
+}
+
+# Saves a PNG of the device screen next to Omarchy's own screenshots and puts
+# it on the clipboard; prints the saved path.
+cmd_screenshot() {
+  local avd="${1:?usage: emuctl screenshot <avd>}" serial
+  serial="$(require_serial "$avd")"
+  local dir="${OMARCHY_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}}"
+  mkdir -p "$dir"
+  local file
+  file="$dir/$avd-$(date +%Y-%m-%d_%H-%M-%S).png"
+  "$ADB_BIN" -s "$serial" exec-out screencap -p > "$file"
+  [ -s "$file" ] || { rm -f "$file"; die "screencap returned nothing"; }
+  if command -v wl-copy >/dev/null 2>&1; then wl-copy --type image/png < "$file"; fi
+  printf '%s\n' "$file"
+}
+
+# Installs an APK, replacing any existing install (-r) and allowing
+# testOnly debug builds (-t), which is what an IDE "run" produces. With no
+# file given, asks for one with a file picker opened in ~/Downloads, or --
+# without zenity -- takes the newest APK there.
+cmd_apk() {
+  local avd="${1:?usage: emuctl apk <avd> [file.apk]}" serial file="${2:-}"
+  serial="$(require_serial "$avd")"
+  if [ -z "$file" ]; then
+    if command -v zenity >/dev/null 2>&1; then
+      file="$(zenity --file-selection --title="Install APK on $avd" \
+        --filename="$HOME/Downloads/" --file-filter='APK files | *.apk' 2>/dev/null)" \
+        || die "no APK chosen"
+    else
+      file="$(ls -t "$HOME"/Downloads/*.apk 2>/dev/null | head -n1 || true)"
+      [ -n "$file" ] || die "no APK given and none found in ~/Downloads"
+    fi
+  fi
+  [ -f "$file" ] || die "no such file: $file"
+  "$ADB_BIN" -s "$serial" install -r -t "$file" >&2
+  printf 'Installed %s\n' "$(basename "$file")"
+}
+
+# Points device-side localhost:<port> at the host's, so an app on the
+# emulator reaches a dev server (Metro's 8081 by default) without knowing the
+# host's address. Reverses don't survive an emulator restart, which is why
+# the widget re-applies them every time an AVD becomes ready.
+cmd_reverse() {
+  local avd="${1:?usage: emuctl reverse <avd> [port...]}" serial
+  serial="$(require_serial "$avd")"
+  shift
+  [ $# -gt 0 ] || set -- 8081
+  local p
+  for p in "$@"; do
+    "$ADB_BIN" -s "$serial" reverse "tcp:$p" "tcp:$p" >/dev/null
+  done
+  printf 'Forwarded %s to the host\n' "$*"
+}
+
+cmd_logcat() {
+  local serial
+  serial="$(require_serial "${1:?usage: emuctl logcat <avd> [logcat args...]}")"
+  shift
+  exec "$ADB_BIN" -s "$serial" logcat "$@"
+}
+
+cmd_shell() {
+  local serial
+  serial="$(require_serial "${1:?usage: emuctl shell <avd> [command...]}")"
+  shift
+  exec "$ADB_BIN" -s "$serial" shell "$@"
 }
 
 # Runs in the foreground (no nohup/background) and prints one progress line
@@ -265,6 +462,7 @@ cmd_create() {
 }
 
 cmd_remove() {
+  [ -n "${1:-}" ] && rm -f "$STATE_DIR/$1.log"
   "$ANDROID_BIN" emulator remove "$@"
 }
 
@@ -318,10 +516,18 @@ Usage:
   emuctl enable-devices        Install cmdline-tools so `profiles`/`create` use real
                                 device ids (pixel_6, pixel_7_pro, ...) instead of
                                 generic sizes (medium_phone, ...)
-  emuctl list [--json]         List AVDs and whether each is running
+  emuctl list [--json]         List AVDs and their state (stopped / starting /
+                                booting / running / failed)
   emuctl profiles              List device ids/profiles usable with `create`
   emuctl start <avd> [--cold] [--headless]
   emuctl stop [<avd>]          Stop a running AVD (omit name if only one is running)
+  emuctl focus <avd>           Raise the AVD's emulator window (Hyprland)
+  emuctl screenshot <avd>      Save a screenshot to ~/Pictures and copy it to the clipboard
+  emuctl apk <avd> [file.apk]  Install an APK (no file: pick one from ~/Downloads)
+  emuctl reverse <avd> [port...]
+                                adb reverse each port to the host (default: 8081, Metro)
+  emuctl logcat <avd> [args...]
+  emuctl shell <avd> [command...]
   emuctl create <device-id-or-profile> [api-level]
                                 Create an AVD (downloads its system image as needed;
                                 api-level defaults to 34, only used with avdmanager)
@@ -341,6 +547,12 @@ main() {
     profiles) cmd_profiles "$@" ;;
     start) cmd_start "$@" ;;
     stop) cmd_stop "$@" ;;
+    focus) cmd_focus "$@" ;;
+    screenshot) cmd_screenshot "$@" ;;
+    apk) cmd_apk "$@" ;;
+    reverse) cmd_reverse "$@" ;;
+    logcat) cmd_logcat "$@" ;;
+    shell) cmd_shell "$@" ;;
     create) cmd_create "$@" ;;
     remove) cmd_remove "$@" ;;
     images) cmd_images "$@" ;;
